@@ -1,0 +1,14 @@
+/build/
+*.o
+*.a
+*.so
+*.so.*
+*.exe
+.DS_Store
+*.swp
+*~
+
+# 本机环境与地址，不入库（实流抽样在 /build/ 下）
+.env
+.env.*
+urls.env
