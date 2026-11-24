@@ -23,6 +23,13 @@ void ms_adts_init(ms_adts *a,
     }
 }
 
+void ms_adts_set_meter(ms_adts *a, ms_copy_meter *m)
+{
+    if (a != NULL) {
+        a->meter = m;
+    }
+}
+
 void ms_adts_destroy(ms_adts *a)
 {
     if (a == NULL) {
@@ -44,11 +51,15 @@ void ms_adts_reset(ms_adts *a)
     alloc = a->alloc;
     max_frame = a->max_frame;
     cb = a->cb;
-    ms_mem_free(a->alloc, a->buf);
-    memset(a, 0, sizeof(*a));
-    a->alloc = alloc;
-    a->max_frame = max_frame;
-    a->cb = cb;
+    {
+        ms_copy_meter *meter = a->meter;
+        ms_mem_free(a->alloc, a->buf);
+        memset(a, 0, sizeof(*a));
+        a->alloc = alloc;
+        a->max_frame = max_frame;
+        a->cb = cb;
+        a->meter = meter;
+    }
 }
 
 void ms_adts_flush_partial(ms_adts *a)
@@ -67,6 +78,16 @@ void ms_adts_flush_partial(ms_adts *a)
     a->ts_rate = 0;
     a->ts_rem = 0;
     /* last config 保留 */
+}
+
+void ms_adts_recover(ms_adts *a)
+{
+    if (a == NULL) {
+        return;
+    }
+    ms_adts_flush_partial(a);
+    a->failed = 0;
+    a->fail_status = MS_OK;
 }
 
 void ms_adts_begin_pes(ms_adts *a, int has_pts, uint64_t pts, int has_dts, uint64_t dts)
@@ -270,18 +291,52 @@ static ms_status emit_ready_frame(ms_adts *a)
         a->have_config = 1;
     }
 
-    if (a->cb.on_au != NULL) {
-        st = a->cb.on_au(a->cb.ctx, &fr);
-        if (st != MS_OK) {
-            return st;
+    {
+        int taken = 0;
+        uint8_t *rem_buf = NULL;
+        size_t rem_n = (a->len > flen) ? (a->len - flen) : 0;
+        size_t rem_cap = 0;
+        if (a->buf != NULL && flen > 0) {
+            if (rem_n > 0) {
+                rem_buf = (uint8_t *)ms_mem_alloc(a->alloc, rem_n);
+                if (rem_buf != NULL) {
+                    memcpy(rem_buf, a->buf + flen, rem_n);
+                    ms_copy_meter_add(a->meter, MS_COPY_ASM, rem_n);
+                    rem_cap = rem_n;
+                    fr.owned_base = a->buf;
+                    fr.owned_cap = a->cap;
+                    fr.owned_taken = &taken;
+                }
+            } else {
+                fr.owned_base = a->buf;
+                fr.owned_cap = a->cap;
+                fr.owned_taken = &taken;
+            }
         }
-    }
-
-    if (a->len > flen) {
-        memmove(a->buf, a->buf + flen, a->len - flen);
-        a->len -= flen;
-    } else {
-        a->len = 0;
+        if (a->cb.on_au != NULL) {
+            st = a->cb.on_au(a->cb.ctx, &fr);
+            if (st != MS_OK) {
+                if (rem_buf != NULL) {
+                    ms_mem_free(a->alloc, rem_buf);
+                }
+                return st;
+            }
+        }
+        if (taken) {
+            a->buf = rem_buf;
+            a->cap = rem_cap;
+            a->len = rem_n;
+        } else {
+            if (rem_buf != NULL) {
+                ms_mem_free(a->alloc, rem_buf);
+            }
+            if (a->len > flen) {
+                memmove(a->buf, a->buf + flen, a->len - flen);
+                a->len -= flen;
+            } else {
+                a->len = 0;
+            }
+        }
     }
     advance_ts_after_frame(a, rate);
     return MS_OK;
@@ -413,6 +468,7 @@ ms_status ms_adts_push(ms_adts *a, const uint8_t *data, size_t size, size_t *con
             return st;
         }
         memcpy(a->buf + a->len, data, chunk);
+        ms_copy_meter_add(a->meter, MS_COPY_ASM, chunk);
         a->len = need;
         if (a->len >= 2 && is_adts_sync(a->buf)) {
             attach_start_ts(a);

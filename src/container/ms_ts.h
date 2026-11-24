@@ -4,6 +4,7 @@
  * H.264 只在 Annex B 子集组出完整访问单元后发 AU，不把 PES 或单个 NAL 当帧。
  * 轨道表最多 MS_TS_MAX_TRACKS；H.264/ADTS 解析状态按实际使用的轨道惰性分配，
  * 计入会话动态预算，不用则不占固定会话对象。
+ * 首次 PMT 前到达的媒体包有界暂存并在 PMT 登记轨道后回放；不把残缺 ADTS/PES 当 AU。
  * by: Long <mycjzb@gmail.com>
  */
 
@@ -15,6 +16,9 @@
 #include "ms_h264.h"
 
 #define MS_PES_DONE_MAX 8
+/* 首次 PMT 之前暂存的 TS 包（188 字节体），PMT 到达后按序回放。环形有界。 */
+#define MS_TS_PRE_PMT_PACKETS 128
+#define MS_TS_PRE_PMT_PKT 188
 
 typedef struct ms_ts_callbacks {
     void *ctx;
@@ -85,6 +89,19 @@ typedef struct ms_ts_track {
     void *parser; /* 回指 ms_ts_parser，供 ADTS 回调填轨道信息 */
     int pending_disc;     /* 下一完整 AU 的 ev.discontinuity 置 1 */
     int disc_event_open;  /* 本轮不连续已发事件，恢复前不重复刷屏 */
+    /* AVS/AVS+（stream_type 0x42）起始码切帧：按图像起始码 B3/B6 切 AU，
+     * 序列头 B0 及其扩展/用户数据并入后随的 I 帧 AU；缓冲由 parser->alloc 持有。 */
+    uint8_t *avs_au;
+    size_t avs_len;
+    size_t avs_cap;
+    int avs_has_pic;
+    int avs_key;
+    int avs_has_seq;
+    int avs_has_pts;
+    int avs_has_dts;
+    uint64_t avs_pts;
+    uint64_t avs_dts;
+    uint32_t avs_cfg_sig;  /* 已上送序列头签名；0=未上送（不连续/flush 后清零以重发） */
 } ms_ts_track;
 
 typedef struct ms_pes_done {
@@ -112,6 +129,8 @@ typedef struct ms_ts_parser {
     int format_emitted;
     uint16_t packet_size; /* 188 或 192 */
     size_t resync_spent;
+    size_t prefix_bytes;           /* 确认前已跳过的伪装/垃圾前缀 */
+    ms_ts_prefix_kind prefix_kind;
 
     int have_pat;
     int have_pmt;
@@ -130,6 +149,18 @@ typedef struct ms_ts_parser {
 
     ms_pes_acc pes[MS_TS_MAX_TRACKS];
     ms_pes_done done[MS_PES_DONE_MAX];
+
+    /* 中途接入：媒体 PES 可能早于 PAT/PMT 到达。有界暂存后回放，计入动态预算。 */
+    uint8_t *pre_pmt;
+    size_t pre_pmt_cap;
+    size_t pre_pmt_count;
+    size_t pre_pmt_sent;
+    int pre_pmt_replayed;
+    int pre_pmt_replaying;
+    ms_copy_meter *meter;
+    /* 容错模式（追加；默认 0 = 严格合同不变）：坏包/坏帧丢弃并标不连续，不让整路失败。 */
+    int tolerant;
+    uint64_t tolerated;
 } ms_ts_parser;
 
 void ms_ts_parser_init(ms_ts_parser *p,
@@ -142,6 +173,7 @@ void ms_ts_parser_init(ms_ts_parser *p,
 void ms_ts_parser_reset(ms_ts_parser *p); /* 释放 PES 缓冲，回到未探测 */
 void ms_ts_parser_flush_partial(ms_ts_parser *p); /* 丢未完成 PSI/PES，保留 PAT/PMT */
 void ms_ts_parser_destroy(ms_ts_parser *p);
+void ms_ts_parser_set_meter(ms_ts_parser *p, ms_copy_meter *m);
 
 /*
  * 从缓冲前端尽量解析。*consumed 为已处理前缀。

@@ -1,0 +1,99 @@
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -957,6 +957,70 @@
+     return 0;
+ }
+ 
++
++/* MsMedia: publish HLS live window in metadata
++ * 把当前窗口 start/end（AV_TIME_BASE）和 vod/event/live 种类写入
++ * AVFormatContext 元数据，并同步 s->start_time。不改 finished 的
++ * duration 语义，也不把滑动窗口长度写成 VOD 总时长。不触碰字幕 ctx。 */
++static void msmedia_refresh_hls_window(HLSContext *c)
++{
++    AVFormatContext *s;
++    struct playlist *pls;
++    int64_t start, end;
++    int i;
++    const char *kind;
++    if (c == NULL || c->ctx == NULL)
++        return;
++    s = c->ctx;
++    if (!c->n_variants || !c->variants[0]->n_playlists ||
++        !c->variants[0]->playlists[0]->n_segments)
++        return;
++    pls = c->variants[0]->playlists[0];
++    start = c->first_timestamp == AV_NOPTS_VALUE ? 0 : c->first_timestamp;
++    {
++        /* 若 MEDIA-SEQUENCE 已推进但 first_timestamp 仍绑在其它 rendition
++         * 而未抬升，用上一次窗口起点加上丢掉的分片时长，避免滑动后起点停滞。 */
++        AVDictionaryEntry *e_seq = av_dict_get(s->metadata, "msmedia.hls.start_seq", NULL, 0);
++        AVDictionaryEntry *e_prev = av_dict_get(s->metadata, "msmedia.hls.window_start", NULL, 0);
++        if (e_seq && e_seq->value && e_prev && e_prev->value) {
++            int64_t prev_seq = strtoll(e_seq->value, NULL, 10);
++            int64_t prev_start = strtoll(e_prev->value, NULL, 10);
++            if (pls->start_seq_no > prev_seq && start <= prev_start) {
++                int64_t dseq = pls->start_seq_no - prev_seq;
++                int64_t unit = 0;
++                if (pls->n_segments && pls->segments[0] &&
++                    pls->segments[0]->duration > 0)
++                    unit = pls->segments[0]->duration;
++                else if (pls->target_duration > 0)
++                    unit = pls->target_duration;
++                if (unit > 0)
++                    if (dseq > 0 && unit > INT64_MAX / dseq)
++                        start = INT64_MAX;
++                    else
++                        start = av_sat_add64(prev_start, unit * dseq);
++
++            }
++        }
++    }
++    end = start;
++    for (i = 0; i < pls->n_segments; i++)
++        end = av_sat_add64(end, pls->segments[i]->duration);
++    if (pls->finished)
++        kind = "vod";
++    else if (pls->type == PLS_TYPE_EVENT)
++        kind = "event";
++    else
++        kind = "live";
++    av_dict_set(&s->metadata, "msmedia.hls.playlist", kind, 0);
++    av_dict_set_int(&s->metadata, "msmedia.hls.window_start", start, 0);
++    av_dict_set_int(&s->metadata, "msmedia.hls.window_end", end, 0);
++    av_dict_set_int(&s->metadata, "msmedia.hls.target_duration",
++                    pls->target_duration, 0);
++    av_dict_set_int(&s->metadata, "msmedia.hls.start_seq",
++                    pls->start_seq_no, 0);
++    s->start_time = start;
++}
++
+ static int parse_playlist(HLSContext *c, const char *url,
+                           struct playlist *pls, AVIOContext *in)
+ {
+@@ -1333,6 +1397,8 @@
+         c->ctx->duration = duration;
+     }
+ 
++    msmedia_refresh_hls_window(c);
++
+     return ret;
+ }
+ 
+@@ -2548,6 +2614,8 @@
+         s->duration = duration;
+     }
+ 
++    msmedia_refresh_hls_window(c);
++
+     /* Associate renditions with variants */
+     for (i = 0; i < c->n_variants; i++) {
+         struct variant *var = c->variants[i];
+@@ -3008,6 +3076,7 @@
+                         av_log(s, AV_LOG_DEBUG,
+                                "First timestamp %"PRId64" from playlist %d\n",
+                                c->first_timestamp, pls->index);
++                        msmedia_refresh_hls_window(c);
+                     }
+                 }
+ 

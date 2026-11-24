@@ -1,0 +1,15 @@
+--- a/libavformat/mpegts.c
++++ b/libavformat/mpegts.c
+@@ -3536,7 +3536,11 @@
+     } else if (check_count >= CHECK_COUNT && maxscore > 6) {
+         return AVPROBE_SCORE_MAX/2 + sumscore - CHECK_COUNT;
+     } else if (sumscore > 6) {
+-        return 2;
++        /* MsMedia: short TS (fewer than 10 FEC-sized slots) used to score 2,
++         * below mpegps's 25. Enabling mpegps then misdetects short AAC TS
++         * and HLS .ts segments as MPEG-PS. Keep a score above that floor
++         * when analyze() already saw a solid 0x47 sync. */
++        return AVPROBE_SCORE_EXTENSION;
+     } else {
+         return 0;
+     }

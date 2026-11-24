@@ -15,6 +15,8 @@ typedef struct ms_synth_stream {
     uint8_t stream_type;
     uint16_t pid;
     char language[4]; /* 可选，空表示无描述符 */
+    const uint8_t *es_descriptor; /* 加法：可选 ES 描述符（不含 tag 前的长度包装已含 tag+len） */
+    uint16_t es_descriptor_size;
 } ms_synth_stream;
 
 typedef struct ms_synth_buf {
@@ -44,6 +46,18 @@ int ms_synth_pat_pmt_version(ms_synth_buf *b,
                              int null_packets,
                              uint16_t packet_size,
                              unsigned version);
+
+/* 加法：可带 PMT program_info 描述符（已含 tag+len，例如 0x05 0x04 'HDMV'）。 */
+int ms_synth_pat_pmt_info(ms_synth_buf *b,
+                          uint16_t program_number,
+                          uint16_t pmt_pid,
+                          const ms_synth_stream *streams,
+                          int nstreams,
+                          int null_packets,
+                          uint16_t packet_size,
+                          unsigned version,
+                          const uint8_t *program_info,
+                          uint16_t program_info_size);
 
 /* 追加一条带可选 PTS 的 PES（payload 原样放入）。 */
 int ms_synth_pes(ms_synth_buf *b,

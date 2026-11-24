@@ -1,56 +1,201 @@
 # MsMedia
 
-by: Long <mycjzb@gmail.com>
+Android 播放器内核：一个 `libmsplayer.so` + 几个 Java 类，接口与 `android.media.MediaPlayer` 一致，换个包名就能用。
+视频走 MediaCodec 硬解，取流/解封装用裁剪过的 FFmpeg 9.1，HTTPS 用静态链接的裁剪 OpenSSL 3.5.9。
 
-自研播放内核。核心使用 C（C11），对外稳定 C ABI，供 Android、Windows、Linux、iOS 共用。网络取流、协议插件、硬解、渲染、时钟调度都在核心之外。
+- 最低 Android 4.3（API 18），已在 API 18 / 34 模拟器上跑过
+- ABI：armeabi-v7a、arm64-v8a、x86、x86_64
+- 运行时只依赖系统库和 `libz.so`，不需要再带 `libssl.so` / `libcrypto.so` / `libffmpeg.so`
 
-当前进行到 **P1i**：在 P1h 余数时间戳与 TS 连续性之上，修复中途接入 H.264 等待 SPS/PPS/IDR 的安全恢复，以及 evq 严格 FIFO。已实现子集为 MPEG-TS + AAC ADTS + 逐行 H.264 Annex B（AUD 或 ITU-T H.264 7.4.1.2.4），不是全部 H.264/AAC，也不是原生网络/HLS 模块。
+仓库：<https://github.com/mycjzb/MsMedia>
 
-宿主开发自测（`./build.sh debug` 带 ASan/UBSan，以及 `./build.sh release`）当前为 31 组核心测试通过。这不等于正式发版，也不等于 el7/四平台或硬解出画验收，也不把开发解析阶段写成全部完成。有界实流抽样中，中途接入的 A/B 视频 AU 已与 ffprobe 自第一个关键包起的包数一致；音频相对 ffprobe 各少 2 帧，原因尚未单独定因。不得把抽样写成硬解或出画成功。
+## 支持范围
 
-公开仓库：<https://github.com/mycjzb/MsMedia>
-
-## 现在可以读什么
-
-| 文档 | 内容 |
+| 类别 | 内容 |
 | --- | --- |
-| [docs/DESIGN.md](docs/DESIGN.md) | 边界、C ABI、格式与编码矩阵、硬解、字幕、seek、AI 字幕 |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | P0–P5 优先级、P1a 起步范围和验收门槛 |
-| [docs/PROGRESS.md](docs/PROGRESS.md) | 真实进度、证据、阻塞和下一步 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 小步修改、回归和注释规范 |
-| [SECURITY.md](SECURITY.md) | 日志、畸形输入和漏洞报告口径 |
-| [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | 第三方许可（当前没有第三方代码） |
-| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | 兼容性参考归类。全部未实现 |
+| 协议 | file、http、https、HLS（含 AES-128、EXT-X-MAP、BYTERANGE、直播）、DASH、rtmp、rtmps、rtsp、udp、rtp |
+| 封装 | MPEG-TS、MP4/MOV/fMP4、FLV、MKV/WebM、AVI、MPEG-PS、裸 AAC/AC-3/E-AC-3/DTS/MP3/FLAC/WAV |
+| 视频 | H.264、H.265、MPEG-2、AVS+ 等，交给 MediaCodec 硬解（能解什么取决于设备）|
+| 音频软解 | AAC、AAC-LATM、AC-3、E-AC-3、MP2、DTS、G.711 A-law、G.711 μ-law；其余格式交给系统解码器 |
+| 音频透传 | AC-3 / E-AC-3 / DTS 直通功放，设备不支持时自动回落软解 |
+| 字幕 | 内核可解 SRT、WebVTT、ASS/SSA、mov_text、PGS、DVB（Java `MediaPlayer` 还没开放字幕/选轨接口，见已知限制） |
+| 其他 | 不看扩展名，按内容探测；切片/文件前面套了 PNG/JPEG 头的会自动剥掉 |
 
-## 编译
+## 接入
 
-唯一入口是根目录 `build.sh`：
+1. 把 `libmsplayer.so` 按 ABI 放进 `src/main/jniLibs/<abi>/`。
+2. 把下面几个 Java 文件拷进工程，包名不要改（JNI 按包名查找）：
 
-```bash
-./build.sh              # 默认
-./build.sh debug        # 可用时带 ASan/UBSan
-./build.sh release      # 优化并 strip
-./build.sh release upx  # 只对可执行文件调用 pack，不对库做 UPX
-./build.sh clean
+```
+android/hw/java/com/msmedia/MediaPlayer.java
+android/hw/java/com/msmedia/MsNativeLoader.java
+android/hw/java/com/msmedia/MsSystemTls.java
+android/hw/java/com/msmedia/net/MsHttpClient.java
 ```
 
-开发自检：`./build.sh debug && ./build/debug/test_core`
+3. 混淆规则：
 
-正式 C 发版应在 CentOS 7 隔离容器中进行。宿主机编译不能代替四平台或 el7 验收。
+```
+-keep class com.msmedia.** { *; }
+-keepclasseswithmembernames class * { native <methods>; }
+```
 
-## 许可证
+4. 需要网络播放的话，记得在 Manifest 里加 `android.permission.INTERNET`。
 
-许可证**尚未选定**。本仓库不放置 LICENSE 文件，也不把某一种开源许可证写成已经生效。用户明确要求提交时可以推送实现，不把尚未选许可证当作该次提交的阻塞。
+## 用法
 
-## 作者
+### 播放
 
-by: Long <mycjzb@gmail.com>
+和系统 MediaPlayer 一样，只是 import 换成 `com.msmedia.MediaPlayer`：
 
+```java
+import com.msmedia.MediaPlayer;
 
-## 开发交叉验证（可选）
+MediaPlayer mp = new MediaPlayer();
+mp.setDataSource("https://example.com/live/index.m3u8");
+mp.setSurface(surfaceView.getHolder().getSurface());
+mp.setOnPreparedListener(p -> p.start());
+mp.setOnErrorListener((p, what, extra) -> { Log.e("player", what + "/" + extra); return true; });
+mp.prepareAsync();
 
-产品库不依赖、不链接 FFmpeg。若宿主机已有 `ffmpeg`/`ffprobe`，可在 `./build.sh debug` 之后运行：
+// 退出时
+mp.release();
+```
 
-    tests/dev_crosscheck.sh
+`seekTo`、`pause`、`getCurrentPosition`、`getDuration`、`setLooping`、各种 Listener 用法都不变。
 
-它会在 `build/dev-samples/` 即时生成短小 lavfi 样本（不入库），并用 `ms_ts_inspect`（公共 ABI）对照 ffprobe/独立 PES 重组。该脚本不是 `./build.sh` 入口，也不作为正式验收。
+### HLS 缓冲（参照 Media3 的 DefaultLoadControl）
+
+HLS 会在后台线程提前下载后面的切片。不设置就用默认值，需要调的话在 `prepare` 之前：
+
+```java
+mp.setBufferConfig(
+        15000,              // minBufferMs：缓冲低于它就继续下载
+        30000,              // maxBufferMs：缓冲到这么多就暂停下载；传 0 关闭预下载
+        1500,               // bufferForPlaybackMs：起播前至少缓冲多少
+        3000,               // bufferForPlaybackAfterRebufferMs：卡顿后恢复前至少缓冲多少
+        16L * 1024 * 1024); // maxBufferBytes：内存上限，最大 256 MiB
+```
+
+上面就是默认值。内存小的盒子可以把 `maxBufferBytes` 调到 4–8 MiB。
+切片下载失败会重试 3 次（间隔 50/100/200 ms，从断点续传），4xx 不重试。
+
+### 杜比 / DTS 透传
+
+```java
+mp.setAudioPassthroughEnabled(true);   // 在 prepare 之前调用
+int caps = MediaPlayer.getAudioPassthroughCaps(context); // 当前输出设备支持哪些格式
+```
+
+设备或功放不支持时自动用软解，不会没声音。
+
+### HTTPS 证书
+
+- **播放器**默认不校验证书（自签证书、IP 直连、老盒子根证书过期都能播）。需要严格校验：
+
+```java
+mp.setPlaybackTlsVerify(true);
+```
+
+- **MsHttpClient** 一直做严格校验（系统 CA + 主机名），没有开关，用来请求业务接口。
+
+### MsHttpClient
+
+```java
+MsHttpClient client = new MsHttpClient.Builder()
+        .connectTimeout(10000)
+        .readTimeout(15000)
+        .build();
+
+MsHttpClient.Request req = new MsHttpClient.RequestBuilder()
+        .url("https://api.example.com/channels")
+        .header("Authorization", "Bearer xxx")
+        .get()
+        .build();
+
+try (MsHttpClient.Response r = client.newCall(req).execute()) {
+    if (r.isSuccessful()) {
+        String body = r.string();
+    }
+}
+```
+
+DNS 和 SOCKS5 是全局设置，播放器和 MsHttpClient 都生效（`configure` 会抛 `IOException`）：
+
+```java
+MsHttpClient.configure(new MsHttpClient.NetConfig()
+        .hostOverride("cdn.example.com", "1.2.3.4")
+        .socks5("10.0.0.2", 1080));
+```
+
+## 从源码编译
+
+需要 Linux x86_64、NDK r29（`ANDROID_NDK_HOME`）、Python 3、perl、gpg、curl。
+
+```bash
+# 下载并校验 FFmpeg 9.1 / OpenSSL 3.5.9 官方源码（只需一次，放在 third_party/cache，不入库）
+scripts/openssl_build.sh && scripts/ffmpeg9_build.sh
+
+# OpenSSL（TLS 1.2/1.3 客户端最小集）
+ABIS="armeabi-v7a arm64-v8a x86 x86_64" scripts/openssl_slim_build.sh
+
+# 裁剪版 FFmpeg
+TRIM=s6 ADEC=1 ADEC_TAG=s6 FF_OPT=oz-flto XML_FLAVOR=ms WITH_XML=1 \
+  ABIS="armeabi-v7a arm64-v8a x86 x86_64" scripts/android_slimff_ffmpeg.sh
+
+# libmsplayer.so
+MODE=slimff ADEC=1 ADEC_TAG=s6 OPT=oz-flto XML_FLAVOR=ms WITH_XML=1 TLS=openssl HLS_PF=1 \
+  ABIS="armeabi-v7a arm64-v8a x86 x86_64" scripts/android_single_build.sh
+# 输出：build/android-<abi>/single-slimff-adec-s6/oz-flto/libmsplayer.so
+
+# 检查 NEEDED / 导出符号 / 组件
+scripts/single_s6_verify.sh
+
+# 演示 APK
+VARIANT=slimff SINGLE_SUB=single-slimff-adec-s6/oz-flto APK_OUT=$PWD/build/single-apk-s6 scripts/android_single_apk.sh
+
+# 宿主测试
+./build.sh test
+tests/single_s6_hls_test.sh      # HLS 预下载 / AES-128 / HTTPS，ASan+UBSan+LSan
+```
+
+### 目录
+
+```
+android/hw/java/   Java 层（MediaPlayer、MsHttpClient）
+android/single/    演示 App
+include/msmedia/   C 头文件
+src/hw/            MediaCodec / AudioTrack / JNI
+src/ff/            FFmpeg 适配、HLS 预下载、tcp/tls 协议替换
+src/netcore/       HTTP、DNS、SOCKS5、TLS（OpenSSL）
+src/core src/codec src/container src/sub   自研解析、字幕
+scripts/           构建脚本、FFmpeg/OpenSSL 裁剪补丁
+tests/             宿主测试和测试服务
+docs/              设计、审计、进度记录
+```
+
+## 体积
+
+`-Oz` + Full LTO，已 strip，没有用 UPX：
+
+| ABI | libmsplayer.so | zip 压缩后 |
+| --- | ---: | ---: |
+| armeabi-v7a | 2.66 MB | 1.52 MB |
+| arm64-v8a | 3.00 MB | 1.53 MB |
+| x86 | 3.06 MB | 1.59 MB |
+| x86_64 | 3.25 MB | 1.56 MB |
+
+其中 OpenSSL 约占 1.0–1.6 MB（未压缩）。
+
+## 已知限制
+
+- 硬解出画、HDMI 透传、AVS+ 只在模拟器和部分盒子上验证过，上线前请在目标设备上跑一遍 `docs/DESIGN_AUDIT.md` 里的真机清单。
+- TLS 只保留 TLS 1.2/1.3 和 ECDHE（P-256/P-384）+ AES-GCM/CBC，不支持 ChaCha20、X25519、DHE 和 TLS 1.0/1.1。
+- HLS 的 SAMPLE-AES 和 DRM 不支持；`maxBufferBytes` 可能被正在下载的那一片多占一点。
+- `com.msmedia.MediaPlayer` 目前没有 `getTrackInfo` / `selectTrack` / `OnTimedTextListener`，多音轨切换和字幕回调还不能通过它用（内核和演示 App 里已有，接口还没接到 MediaPlayer 上）。
+- 不支持 iOS / Windows。
+
+## License
+
+MsMedia 代码按 LGPL-2.1 发布，全文见 [LICENSE](LICENSE)。
+静态链接的 FFmpeg 9.1 是 LGPL-2.1-or-later（没有开启 GPL/nonfree），OpenSSL 3.5.9 是 Apache-2.0。分发 `libmsplayer.so` 时要附上这两者的版权声明并提供对应源码，详见 [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)。

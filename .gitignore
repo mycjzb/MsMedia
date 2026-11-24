@@ -12,3 +12,22 @@
 .env
 .env.*
 urls.env
+
+# 官方 FFmpeg 源码 tarball/解包与本机 prefix，不入库。版本钉在 third_party/ffmpeg-9.1.pin。
+third_party/cache/
+build/ffmpeg-9.1/
+
+# 钉选 OpenSSL 3.5.9 源码在 third_party/cache/（已忽略）。本机 prefix 不入库。
+# 版本钉在 third_party/openssl-3.5.9.pin。
+build/openssl-3.5.9/
+
+# 构建与测试产物、日志、本地工具缓存
+*.log
+*.apk
+*.idsig
+*.bak
+__pycache__/
+*.pyc
+local.properties
+.gradle/
+.idea/

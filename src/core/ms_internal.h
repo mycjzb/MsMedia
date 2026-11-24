@@ -18,6 +18,7 @@
 #define MS_DEFAULT_MAX_RESYNC_BYTES ((size_t)256 * 1024)
 #define MS_DEFAULT_MAX_ASSEMBLY_BYTES ((size_t)2 * 1024 * 1024)
 #define MS_DEFAULT_SESSION_BUDGET_BYTES ((size_t)16 * 1024 * 1024)
+#define MS_DEFAULT_MAX_LOOKBACK_BYTES ((size_t)8 * 1024 * 1024)
 
 #define MS_ABS_PROBE_BYTES          ((size_t)8 * 1024 * 1024)
 #define MS_ABS_AU_QUEUE_BYTES       ((size_t)16 * 1024 * 1024)
@@ -26,6 +27,7 @@
 #define MS_ABS_MAX_RESYNC_BYTES     ((size_t)1 * 1024 * 1024)
 #define MS_ABS_MAX_ASSEMBLY_BYTES   ((size_t)16 * 1024 * 1024)
 #define MS_ABS_SESSION_BUDGET_BYTES ((size_t)64 * 1024 * 1024)
+#define MS_ABS_MAX_LOOKBACK_BYTES     ((size_t)16 * 1024 * 1024)
 
 #define MS_MEM_ACCT_MAGIC           0x4D534131u /* "MSA1" */
 #define MS_MEM_HDR_MAGIC            0x4D534831u /* "MSH1" */
@@ -58,10 +60,47 @@ typedef struct ms_au_frame {
     int format_changed;
     int is_keyframe;
     int discontinuity; /* 该轨此前发生过传输不连续，本 AU 为恢复后第一帧时为 1 */
+    int preroll; /* 1：解码需要但早于用户请求时间，显示丢弃由控制层做 */
+    ms_sample_format sample_format; /* 0 表示由会话按 codec/容器补齐 */
+    int time_base_num;
+    int time_base_den; /* 0 表示沿用会话默认（TS 为 1/90000） */
+    /*
+     * 可选所有权移交：owned_base 为 ms_mem_alloc 返回的块首地址，
+     * 载荷 [data, data+size) 必须落在 [owned_base, owned_base+owned_cap)。
+     * 入队成功且采取移交时 *owned_taken=1，调用方不得再释放该块。
+     * 失败或未采取时保持 0，所有权仍在调用方。owned_taken 可为 NULL。
+     */
+    uint8_t *owned_base;
+    size_t owned_cap;
+    int *owned_taken;
 } ms_au_frame;
+
+typedef struct ms_copy_meter {
+    uint64_t copy_in_ops;
+    uint64_t copy_in_bytes;
+    uint64_t copy_asm_ops;
+    uint64_t copy_asm_bytes;
+    uint64_t copy_out_ops;
+    uint64_t copy_out_bytes;
+    uint64_t move_out_ops;
+    uint64_t move_out_bytes;
+} ms_copy_meter;
+
+enum {
+    MS_COPY_IN = 0,
+    MS_COPY_ASM = 1,
+    MS_COPY_OUT = 2,
+    MS_COPY_MOVE = 3
+};
+
+void ms_copy_meter_add(ms_copy_meter *m, int kind, size_t n);
+int ms_owned_contains(const uint8_t *base, size_t cap,
+                      const uint8_t *data, size_t size);
 
 int ms_size_add(size_t a, size_t b, size_t *out);
 int ms_size_mul(size_t a, size_t b, size_t *out);
+/* out = v * num / den，溢出返回 -1。den 不得为 0。 */
+int ms_u64_scale(uint64_t v, uint64_t num, uint64_t den, uint64_t *out);
 
 void *ms_mem_alloc(const ms_allocator *a, size_t size);
 void ms_mem_free(const ms_allocator *a, void *p);
@@ -124,5 +163,28 @@ void ms_ts_map_stream_type(uint8_t stream_type,
                            ms_codec *codec,
                            ms_track_kind *kind,
                            ms_recog_level *level);
+
+/* 内部调试：BMFF 箱体遍历状态。不是 AU，也不是稳定 ABI。 */
+typedef struct ms_bmff_debug_info {
+    ms_format format;
+    uint32_t major_brand;
+    int nboxes;
+    int max_depth;
+    int saw_moov;
+    int saw_mdat;
+    int saw_moof;
+    int saw_mvex;
+    int truncated_mdat;
+    uint64_t bytes_skipped;
+} ms_bmff_debug_info;
+
+ms_status ms_session_debug_bmff(const ms_session *session, ms_bmff_debug_info *out);
+
+/* 1：禁止 AU 所有权移交，强制走 evq memcpy，便于与移交路径对照。 */
+void ms_session_debug_set_force_copy(ms_session *session, int on);
+
+/* 内部：TS 容错开关（单 so 网络输入用；默认关闭，严格合同与官方测试不变）。 */
+void ms_session_set_ts_tolerant(ms_session *session, int on);
+uint64_t ms_session_ts_tolerated(const ms_session *session);
 
 #endif /* MSMEDIA_INTERNAL_H */

@@ -4,6 +4,7 @@
  */
 
 #include "ms_ts.h"
+#include "ms_ts_scan.h"
 #include "ms_crc32.h"
 
 static void psi_reset(ms_psi_acc *s)
@@ -38,6 +39,19 @@ static void pending_free(ms_ts_parser *p, ms_es_pending *pend)
     memset(pend, 0, sizeof(*pend));
 }
 
+/* AVS：丢弃未完成 AU（不释放缓冲）。 */
+static void avs_reset_au(ms_ts_track *t)
+{
+    t->avs_len = 0;
+    t->avs_has_pic = 0;
+    t->avs_key = 0;
+    t->avs_has_seq = 0;
+    t->avs_has_pts = 0;
+    t->avs_has_dts = 0;
+    t->avs_pts = 0;
+    t->avs_dts = 0;
+}
+
 static void track_release(ms_ts_parser *p, ms_ts_track *t)
 {
     if (t->adts != NULL) {
@@ -53,6 +67,13 @@ static void track_release(ms_ts_parser *p, ms_ts_track *t)
     }
     t->h264_inited = 0;
     pending_free(p, &t->pending);
+    if (t->avs_au != NULL) {
+        ms_mem_free(p->alloc, t->avs_au);
+    }
+    t->avs_au = NULL;
+    t->avs_cap = 0;
+    avs_reset_au(t);
+    t->avs_cfg_sig = 0;
 }
 
 static void fill_track_info(const ms_ts_track *t, ms_track_info *info)
@@ -124,6 +145,9 @@ static ms_status adts_on_au(void *ctx, const ms_adts_frame *fr)
     au.dts = fr->dts;
     au.format_changed = fr->format_changed;
     au.is_keyframe = 1;
+    au.owned_base = fr->owned_base;
+    au.owned_cap = fr->owned_cap;
+    au.owned_taken = fr->owned_taken;
     au.discontinuity = t->pending_disc ? 1 : 0;
     t->pending_disc = 0;
     t->disc_event_open = 0;
@@ -204,6 +228,7 @@ static ms_status track_init_adts(ms_ts_parser *p, ms_ts_track *t)
     cb.on_au = adts_on_au;
     t->parser = p;
     ms_adts_init(obj, p->alloc, p->max_pes_bytes, &cb);
+    ms_adts_set_meter(obj, p->meter);
     t->adts = obj;
     t->adts_inited = 1;
     return MS_OK;
@@ -230,6 +255,7 @@ static ms_status track_init_h264(ms_ts_parser *p, ms_ts_track *t)
     cb.on_au = h264_on_au;
     t->parser = p;
     ms_h264_init(obj, p->alloc, p->max_pes_bytes, &cb);
+    ms_h264_set_meter(obj, p->meter);
     t->h264 = obj;
     t->h264_inited = 1;
     return MS_OK;
@@ -259,6 +285,7 @@ static ms_status pending_store(ms_ts_parser *p, ms_es_pending *pend,
         return MS_ERR_NOMEM;
     }
     memcpy(nbuf, data, size);
+    ms_copy_meter_add(p->meter, MS_COPY_ASM, size);
     pending_free(p, pend);
     (void)cap;
     pend->data = nbuf;
@@ -269,6 +296,25 @@ static ms_status pending_store(ms_ts_parser *p, ms_es_pending *pend,
     pend->pts = pts;
     pend->has_dts = has_dts;
     pend->dts = dts;
+    return MS_OK;
+}
+
+/* 容错：编码组帧报坏数据时恢复组帧器，丢弃该段，下一 AU 标不连续。 */
+static ms_status tol_codec(ms_ts_parser *p, ms_ts_track *t, ms_status st)
+{
+    if (!p->tolerant || (st != MS_ERR_MALFORMED && st != MS_ERR_UNSUPPORTED && st != MS_ERR_OVERFLOW)) {
+        return st;
+    }
+    if (t->h264 != NULL && t->h264->failed) {
+        ms_h264_recover(t->h264);
+    } else if (t->adts != NULL && t->adts->failed) {
+        ms_adts_recover(t->adts);
+    } else {
+        return st;
+    }
+    pending_free(p, &t->pending);
+    t->pending_disc = 1;
+    p->tolerated++;
     return MS_OK;
 }
 
@@ -305,6 +351,9 @@ static ms_status feed_aac_track(ms_ts_parser *p, ms_ts_track *t,
             pending_free(p, &t->pending);
         }
         if (st != MS_OK) {
+            st = tol_codec(p, t, st);
+        }
+        if (st != MS_OK) {
             return st;
         }
     } else if (t->pending.data != NULL) {
@@ -319,6 +368,9 @@ static ms_status feed_aac_track(ms_ts_parser *p, ms_ts_track *t,
     }
     used = 0;
     st = ms_adts_push(t->adts, data, size, &used);
+    if (st != MS_OK && st != MS_LIMIT && tol_codec(p, t, st) == MS_OK) {
+        return MS_OK; /* 容错：本段丢弃 */
+    }
     if (used < size) {
         ms_status pst = pending_store(p, &t->pending, data + used, size - used,
                                       1, 0, 0, 0, 0);
@@ -361,6 +413,9 @@ static ms_status feed_h264_track(ms_ts_parser *p, ms_ts_track *t,
             pending_free(p, &t->pending);
         }
         if (st != MS_OK) {
+            st = tol_codec(p, t, st);
+        }
+        if (st != MS_OK) {
             return st;
         }
     } else if (t->pending.data != NULL) {
@@ -375,6 +430,9 @@ static ms_status feed_h264_track(ms_ts_parser *p, ms_ts_track *t,
     }
     used = 0;
     st = ms_h264_push(t->h264, data, size, &used);
+    if (st != MS_OK && st != MS_LIMIT && tol_codec(p, t, st) == MS_OK) {
+        return MS_OK; /* 容错：本段丢弃 */
+    }
     if (used < size) {
         ms_status pst = pending_store(p, &t->pending, data + used, size - used,
                                       1, 0, 0, 0, 0);
@@ -448,6 +506,18 @@ static ms_status end_all_adts(ms_ts_parser *p)
 }
 
 
+static void pre_pmt_free(ms_ts_parser *p)
+{
+    if (p == NULL) {
+        return;
+    }
+    ms_mem_free(p->alloc, p->pre_pmt);
+    p->pre_pmt = NULL;
+    p->pre_pmt_cap = 0;
+    p->pre_pmt_count = 0;
+    p->pre_pmt_sent = 0;
+}
+
 static void clear_tracks_and_pes(ms_ts_parser *p)
 {
     int i;
@@ -459,6 +529,7 @@ static void clear_tracks_and_pes(ms_ts_parser *p)
     for (i = 0; i < MS_PES_DONE_MAX; i++) {
         pes_done_free(p, &p->done[i]);
     }
+    pre_pmt_free(p);
     p->ntracks = 0;
     p->selected_video = 0;
     p->selected_audio = 0;
@@ -478,6 +549,13 @@ void ms_ts_parser_init(ms_ts_parser *p,
     p->max_pes_bytes = (max_pes_bytes == 0) ? MS_DEFAULT_AU_QUEUE_BYTES : max_pes_bytes;
     if (cb != NULL) {
         p->cb = *cb;
+    }
+}
+
+void ms_ts_parser_set_meter(ms_ts_parser *p, ms_copy_meter *m)
+{
+    if (p != NULL) {
+        p->meter = m;
     }
 }
 
@@ -504,13 +582,17 @@ void ms_ts_parser_reset(ms_ts_parser *p)
     resync = p->max_resync_bytes;
     pes = p->max_pes_bytes;
     cb = p->cb;
-    clear_tracks_and_pes(p);
-    memset(p, 0, sizeof(*p));
-    p->alloc = alloc;
-    p->probe_bytes = probe;
-    p->max_resync_bytes = resync;
-    p->max_pes_bytes = pes;
-    p->cb = cb;
+    {
+        ms_copy_meter *meter = p->meter;
+        clear_tracks_and_pes(p);
+        memset(p, 0, sizeof(*p));
+        p->alloc = alloc;
+        p->probe_bytes = probe;
+        p->max_resync_bytes = resync;
+        p->max_pes_bytes = pes;
+        p->cb = cb;
+        p->meter = meter;
+    }
 }
 
 void ms_ts_parser_flush_partial(ms_ts_parser *p)
@@ -538,87 +620,20 @@ void ms_ts_parser_flush_partial(ms_ts_parser *p)
             ms_h264_flush_partial(p->tracks[i].h264);
         }
         pending_free(p, &p->tracks[i].pending);
+        /* AVS：flush/seek 后丢半帧并清序列头签名，下一序列头重新上送 CODEC_CONFIG。 */
+        avs_reset_au(&p->tracks[i]);
+        p->tracks[i].avs_cfg_sig = 0;
     }
     p->resync_spent = 0;
+    if (!p->pre_pmt_replayed) {
+        pre_pmt_free(p);
+    }
 }
 
 static void fail_parser(ms_ts_parser *p, ms_status st)
 {
     p->failed = 1;
     p->fail_status = st;
-}
-
-static int sync_run(const uint8_t *data, size_t size, size_t off, uint16_t psz, int want)
-{
-    int n = 0;
-    size_t pos = off;
-
-    while (n < want) {
-        size_t ts_off;
-        if (psz == 192) {
-            /* 允许从 0x47 起算，或从 4 字节前缀起算。off 指向 0x47。 */
-            ts_off = pos;
-        } else {
-            ts_off = pos;
-        }
-        if (ts_off + 1 > size) {
-            break;
-        }
-        if (data[ts_off] != 0x47) {
-            break;
-        }
-        n++;
-        pos += psz;
-        if (n < want && pos >= size) {
-            break;
-        }
-    }
-    return n;
-}
-
-/*
- * 在 size 范围内寻找至少 MS_TS_SYNC_NEEDED 个连续同步。
- * 找到则 *out_off 为第一个 0x47 的位置，*out_psz 为 188 或 192。
- * 两种周期都成立时取连续更多的一方，一样则优先 188。
- */
-static int find_sync(const uint8_t *data, size_t size,
-                     size_t *out_off, uint16_t *out_psz)
-{
-    uint16_t cand_psz = 0;
-    size_t cand_off = 0;
-    int cand_n = 0;
-    uint16_t psz;
-    size_t off;
-
-    if (data == NULL || size < (size_t)MS_TS_SYNC_NEEDED * 188u) {
-        return 0;
-    }
-
-    for (psz = 188; ; psz = 192) {
-        size_t max_off = (size < (size_t)psz) ? size : (size_t)psz;
-        for (off = 0; off < max_off; off++) {
-            int n;
-            if (data[off] != 0x47) {
-                continue;
-            }
-            n = sync_run(data, size, off, psz, 16);
-            if (n >= MS_TS_SYNC_NEEDED && n > cand_n) {
-                cand_n = n;
-                cand_off = off;
-                cand_psz = psz;
-            }
-        }
-        if (psz == 192) {
-            break;
-        }
-    }
-
-    if (cand_n < MS_TS_SYNC_NEEDED) {
-        return 0;
-    }
-    *out_off = cand_off;
-    *out_psz = cand_psz;
-    return 1;
 }
 
 static const uint8_t *packet_ts(const uint8_t *pkt, uint16_t psz)
@@ -751,6 +766,8 @@ static void drop_incomplete_es(ms_ts_parser *p, ms_ts_track *t)
     if (t->h264_inited && t->h264 != NULL) {
         ms_h264_flush_partial(t->h264);
     }
+    avs_reset_au(t);
+    t->avs_cfg_sig = 0;
     t->pending_disc = 1;
 }
 
@@ -916,6 +933,44 @@ static ms_pes_acc *pes_by_pid(ms_ts_parser *p, uint16_t pid)
     return NULL;
 }
 
+
+static int desc_is_bitmap_sub(const uint8_t *d, size_t dlen)
+{
+    size_t i = 0;
+    while (i + 2 <= dlen) {
+        unsigned tag = d[i];
+        unsigned ln = d[i + 1];
+        i += 2;
+        if (i + ln > dlen) {
+            break;
+        }
+        /* 0x59 subtitling_descriptor；0x56 teletext_descriptor：位图/图文，不解析 */
+        if (tag == 0x59 || tag == 0x56) {
+            return 1;
+        }
+        i += ln;
+    }
+    return 0;
+}
+
+static int desc_has_tag(const uint8_t *d, size_t dlen, unsigned want)
+{
+    size_t i = 0;
+    while (i + 2 <= dlen) {
+        unsigned tag = d[i];
+        unsigned ln = d[i + 1];
+        i += 2;
+        if (i + ln > dlen) {
+            break;
+        }
+        if (tag == want) {
+            return 1;
+        }
+        i += ln;
+    }
+    return 0;
+}
+
 static void lang_from_descriptors(const uint8_t *d, size_t dlen, char lang[4])
 {
     size_t i = 0;
@@ -1026,6 +1081,8 @@ static ms_status finish_pat(ms_ts_parser *p, const uint8_t *sec, size_t slen)
         p->selected_audio = 0;
         p->have_pmt = 0;
         psi_reset(&p->pmt);
+        p->pre_pmt_replayed = 0;
+        pre_pmt_free(p);
     }
 
     p->have_pat = 1;
@@ -1120,6 +1177,13 @@ static ms_status finish_pmt(ms_ts_parser *p, const uint8_t *sec, size_t slen)
         t->stream_type = stype;
         ms_ts_map_stream_type(stype, &t->codec, &t->kind, &t->level);
         lang_from_descriptors(desc, es_len, t->language);
+        if (stype == 0x06 && desc_is_bitmap_sub(desc, es_len)) {
+            t->kind = MS_TRACK_SUBTITLE;
+            /* 0x59 subtitling_descriptor = DVB 位图字幕（EN 300 743），可解码到 RGBA cue；
+             * 0x56 teletext 仍按未解析位图类登记（不播放）。 */
+            t->codec = desc_has_tag(desc, es_len, 0x59) ? MS_CODEC_SUB_DVB : MS_CODEC_SUB_BITMAP;
+            t->level = MS_RECOG_CONTAINER_ID;
+        }
         if (t->kind == MS_TRACK_VIDEO && first_video) {
             t->selected = 1;
             first_video = 0;
@@ -1441,6 +1505,179 @@ static int parse_pts(const uint8_t *h, unsigned expected_prefix, uint64_t *out)
     return 0;
 }
 
+/* ---- AVS / AVS+ 起始码切帧（GB/T 20090.2 / GY/T 257.1） ----
+ * 0x42 只表示 AVS 家族；仅序列头 profile_id=0x48 才升格 AVS+ 并上送 CODEC_CONFIG（CSD=序列头）。
+ * 切分规则：已含图像的 AU 遇到 B0（序列头）/B3（I）/B6（PB）/B7（编辑码）即结束；
+ * PES 带 data_alignment 且已含图像时在 PES 末尾立即出帧，不等下一 PES（起播少等一帧）。 */
+#define MS_TS_AVS_SC_SEQ 0xB0u
+#define MS_TS_AVS_SC_END 0xB1u
+#define MS_TS_AVS_SC_I   0xB3u
+#define MS_TS_AVS_SC_PB  0xB6u
+#define MS_TS_AVS_SC_EDIT 0xB7u
+
+static ms_status avs_append(ms_ts_parser *p, ms_ts_track *t, const uint8_t *d, size_t n)
+{
+    size_t need;
+    if (n == 0) {
+        return MS_OK;
+    }
+    if (ms_size_add(t->avs_len, n, &need) != 0 || need > p->max_pes_bytes) {
+        /* 超过单帧上限：丢掉这一帧，防止异常流无界增长。 */
+        avs_reset_au(t);
+        return MS_LIMIT;
+    }
+    if (need > t->avs_cap) {
+        size_t cap = t->avs_cap ? t->avs_cap : 4096u;
+        uint8_t *nb;
+        while (cap < need) {
+            cap = (cap > p->max_pes_bytes / 2u) ? p->max_pes_bytes : cap * 2u;
+        }
+        nb = (uint8_t *)ms_mem_alloc(p->alloc, cap);
+        if (nb == NULL) {
+            avs_reset_au(t);
+            return ms_acct_is_budget_limit(p->alloc) ? MS_LIMIT : MS_ERR_NOMEM;
+        }
+        if (t->avs_len > 0) {
+            memcpy(nb, t->avs_au, t->avs_len);
+        }
+        if (t->avs_au != NULL) {
+            ms_mem_free(p->alloc, t->avs_au);
+        }
+        t->avs_au = nb;
+        t->avs_cap = cap;
+    }
+    memcpy(t->avs_au + t->avs_len, d, n);
+    t->avs_len += n;
+    return MS_OK;
+}
+
+static ms_status avs_emit(ms_ts_parser *p, ms_ts_track *t)
+{
+    ms_track_info info;
+    ms_au_frame au;
+    ms_status st = MS_OK;
+
+    if (t->avs_len == 0 || !t->avs_has_pic) {
+        avs_reset_au(t);
+        return MS_OK;
+    }
+    if (t->avs_has_seq) {
+        ms_video_cfg vc;
+        ms_video_cfg_default(&vc);
+        if (ms_video_cfg_parse(MS_CODEC_AVS_PLUS, MS_SAMPLE_FMT_CAVS, 1,
+                               t->avs_au, t->avs_len, &vc) == MS_OK &&
+            vc.complete && vc.csd_size > 0 && vc.payload_sig != t->avs_cfg_sig) {
+            if (t->codec != MS_CODEC_AVS_PLUS || !t->level_upgraded) {
+                t->codec = MS_CODEC_AVS_PLUS;
+                t->level = MS_RECOG_AU;
+                t->level_upgraded = 1;
+                if (p->cb.on_track != NULL) {
+                    fill_track_info(t, &info);
+                    st = p->cb.on_track(p->cb.ctx, &info, 1);
+                    if (st != MS_OK && st != MS_LIMIT) {
+                        avs_reset_au(t);
+                        return st;
+                    }
+                }
+            }
+            if (p->cb.on_codec_config != NULL) {
+                fill_track_info(t, &info);
+                info.level = MS_RECOG_AU;
+                st = p->cb.on_codec_config(p->cb.ctx, &info, vc.csd, vc.csd_size);
+                if (st != MS_OK && st != MS_LIMIT) {
+                    avs_reset_au(t);
+                    return st;
+                }
+            }
+            t->avs_cfg_sig = vc.payload_sig;
+        }
+    }
+    if (p->cb.on_au != NULL) {
+        fill_track_info(t, &info);
+        info.level = (t->codec == MS_CODEC_AVS_PLUS) ? MS_RECOG_AU : t->level;
+        memset(&au, 0, sizeof(au));
+        au.data = t->avs_au;
+        au.size = t->avs_len;
+        au.has_pts = t->avs_has_pts;
+        au.pts = t->avs_pts;
+        au.has_dts = t->avs_has_dts ? 1 : t->avs_has_pts;
+        au.dts = t->avs_has_dts ? t->avs_dts : t->avs_pts;
+        au.is_keyframe = t->avs_key;
+        au.sample_format = MS_SAMPLE_FMT_CAVS;
+        au.discontinuity = t->pending_disc ? 1 : 0;
+        t->pending_disc = 0;
+        t->disc_event_open = 0;
+        st = p->cb.on_au(p->cb.ctx, &info, &au);
+    }
+    avs_reset_au(t);
+    return st;
+}
+
+/* 一个完整 PES 载荷进切帧器。aligned=PES 头 data_alignment_indicator。 */
+static ms_status feed_avs_pes(ms_ts_parser *p, ms_ts_track *t,
+                              const uint8_t *d, size_t n, int aligned,
+                              int has_pts, uint64_t pts, int has_dts, uint64_t dts)
+{
+    size_t i = 0, seg = 0;
+    int pts_used = 0;
+    ms_status st, ret = MS_OK;
+
+    while (n >= 4 && i + 3 < n) {
+        unsigned sc;
+        if (d[i] != 0 || d[i + 1] != 0 || d[i + 2] != 1) {
+            i++;
+            continue;
+        }
+        sc = d[i + 3];
+        if (t->avs_has_pic &&
+            (sc == MS_TS_AVS_SC_SEQ || sc == MS_TS_AVS_SC_I ||
+             sc == MS_TS_AVS_SC_PB || sc == MS_TS_AVS_SC_EDIT)) {
+            st = avs_append(p, t, d + seg, i - seg);
+            if (st == MS_OK) {
+                st = avs_emit(p, t);
+            }
+            if (st == MS_LIMIT) {
+                ret = MS_LIMIT;
+            } else if (st != MS_OK) {
+                return st;
+            }
+            seg = i;
+        }
+        if (sc == MS_TS_AVS_SC_SEQ) {
+            t->avs_has_seq = 1;
+        } else if ((sc == MS_TS_AVS_SC_I || sc == MS_TS_AVS_SC_PB) && !t->avs_has_pic) {
+            t->avs_has_pic = 1;
+            t->avs_key = (sc == MS_TS_AVS_SC_I);
+            if (has_pts && !pts_used) {
+                t->avs_has_pts = 1;
+                t->avs_pts = pts;
+                t->avs_has_dts = has_dts;
+                t->avs_dts = dts;
+                pts_used = 1;
+            }
+        }
+        i += 4;
+    }
+    if (seg < n) {
+        st = avs_append(p, t, d + seg, n - seg);
+        if (st == MS_LIMIT) {
+            ret = MS_LIMIT;
+        } else if (st != MS_OK) {
+            return st;
+        }
+    }
+    if (aligned && t->avs_has_pic) {
+        st = avs_emit(p, t);
+        if (st == MS_LIMIT) {
+            ret = MS_LIMIT;
+        } else if (st != MS_OK) {
+            return st;
+        }
+    }
+    (void)MS_TS_AVS_SC_END;
+    return ret;
+}
+
 static ms_status store_done_pes(ms_ts_parser *p, ms_pes_acc *acc, ms_codec codec)
 {
     const uint8_t *buf = acc->buf;
@@ -1451,6 +1688,7 @@ static ms_status store_done_pes(ms_ts_parser *p, ms_pes_acc *acc, ms_codec codec
     unsigned flags;
     int has_pts = 0;
     int has_dts = 0;
+    int aligned = 0;
     uint64_t pts = 0;
     uint64_t dts = 0;
     const uint8_t *payload;
@@ -1476,6 +1714,7 @@ static ms_status store_done_pes(ms_ts_parser *p, ms_pes_acc *acc, ms_codec codec
         len >= 9) {
         flags = buf[7];
         hlen = buf[8];
+        aligned = (buf[6] & 0x04) ? 1 : 0;
         if (9u + hlen > len) {
             acc->len = 0;
             acc->need = 0;
@@ -1505,6 +1744,44 @@ static ms_status store_done_pes(ms_ts_parser *p, ms_pes_acc *acc, ms_codec codec
             if (tr != NULL) {
                 aac_st = feed_aac_track(p, tr, payload, payload_size, 1,
                                         has_pts, pts, has_dts, dts);
+                if (aac_st != MS_OK && aac_st != MS_AGAIN && aac_st != MS_LIMIT) {
+                    acc->len = 0;
+                    acc->need = 0;
+                    return aac_st;
+                }
+            }
+        } else if (codec == MS_CODEC_SUB_DVB && payload_size > 0 && p->cb.on_au != NULL) {
+            /* DVB 位图字幕：一 PES 即一个显示集，原样（含 0x20 0x00 前缀）作为字幕 AU 上送，
+             * 由播放器 ms_sub_bitmap 解析为 RGBA cue。非持有缓冲，会话入队时复制。 */
+            ms_ts_track *tr = track_by_pid(p, acc->pid);
+            if (tr != NULL) {
+                ms_track_info info;
+                ms_au_frame au;
+                fill_track_info(tr, &info);
+                info.level = MS_RECOG_AU;
+                memset(&au, 0, sizeof(au));
+                au.data = payload;
+                au.size = payload_size;
+                au.has_pts = has_pts;
+                au.pts = pts;
+                au.has_dts = has_pts;
+                au.dts = pts;
+                au.is_keyframe = 1;
+                au.discontinuity = tr->pending_disc ? 1 : 0;
+                tr->pending_disc = 0;
+                aac_st = p->cb.on_au(p->cb.ctx, &info, &au);
+                if (aac_st != MS_OK && aac_st != MS_AGAIN && aac_st != MS_LIMIT) {
+                    acc->len = 0;
+                    acc->need = 0;
+                    return aac_st;
+                }
+            }
+        } else if ((codec == MS_CODEC_AVS_FAMILY || codec == MS_CODEC_AVS_PLUS) &&
+                   payload_size > 0) {
+            ms_ts_track *tr = track_by_pid(p, acc->pid);
+            if (tr != NULL) {
+                aac_st = feed_avs_pes(p, tr, payload, payload_size, aligned,
+                                      has_pts, pts, has_dts, dts);
                 if (aac_st != MS_OK && aac_st != MS_AGAIN && aac_st != MS_LIMIT) {
                     acc->len = 0;
                     acc->need = 0;
@@ -1589,6 +1866,16 @@ static ms_status close_open_pes(ms_ts_parser *p)
             return st;
         }
     }
+    /* EOS：未带 data_alignment 而暂存的 AVS 末帧也要送出。 */
+    for (i = 0; i < MS_TS_MAX_TRACKS; i++) {
+        ms_ts_track *t = &p->tracks[i];
+        if (t->in_use && t->avs_has_pic && t->avs_len > 0) {
+            ms_status st = avs_emit(p, t);
+            if (st != MS_OK && st != MS_LIMIT) {
+                return st;
+            }
+        }
+    }
     return MS_OK;
 }
 
@@ -1648,6 +1935,7 @@ static ms_status feed_pes(ms_ts_parser *p, uint16_t pid, ms_codec codec,
             return st;
         }
         memcpy(acc->buf, payload, plen);
+        ms_copy_meter_add(p->meter, MS_COPY_ASM, plen);
         acc->len = plen;
         if (acc->len >= 6) {
             unsigned pkt_len = ((unsigned)acc->buf[4] << 8) | acc->buf[5];
@@ -1686,6 +1974,7 @@ static ms_status feed_pes(ms_ts_parser *p, uint16_t pid, ms_codec codec,
             return st;
         }
         memcpy(acc->buf + acc->len, payload, plen);
+        ms_copy_meter_add(p->meter, MS_COPY_ASM, plen);
         acc->len = total;
     }
     if (acc->need == 0 && acc->len >= 6) {
@@ -1700,6 +1989,86 @@ static ms_status feed_pes(ms_ts_parser *p, uint16_t pid, ms_codec codec,
         }
     }
     return pes_close_if_complete(p, acc, codec);
+}
+
+static ms_status parse_one_packet(ms_ts_parser *p, const uint8_t *ts, int *disc);
+
+static ms_status hold_pre_pmt_packet(ms_ts_parser *p, const uint8_t *ts)
+{
+    size_t need;
+
+    if (p->pre_pmt_replayed || p->pre_pmt_replaying) {
+        return MS_OK;
+    }
+    if (p->pre_pmt == NULL) {
+        need = (size_t)MS_TS_PRE_PMT_PACKETS * (size_t)MS_TS_PRE_PMT_PKT;
+        p->pre_pmt = (uint8_t *)ms_mem_alloc(p->alloc, need);
+        if (p->pre_pmt == NULL) {
+            /* 预算不足则放弃暂存，行为与原先「PMT 前丢媒体」相同。 */
+            return MS_OK;
+        }
+        p->pre_pmt_cap = (size_t)MS_TS_PRE_PMT_PACKETS;
+        p->pre_pmt_count = 0;
+        p->pre_pmt_sent = 0;
+    }
+    if (p->pre_pmt_count >= p->pre_pmt_cap) {
+        memmove(p->pre_pmt, p->pre_pmt + MS_TS_PRE_PMT_PKT,
+                (p->pre_pmt_count - 1) * (size_t)MS_TS_PRE_PMT_PKT);
+        p->pre_pmt_count--;
+        if (p->pre_pmt_sent > 0) {
+            p->pre_pmt_sent--;
+        }
+    }
+    memcpy(p->pre_pmt + p->pre_pmt_count * (size_t)MS_TS_PRE_PMT_PKT,
+           ts, (size_t)MS_TS_PRE_PMT_PKT);
+    ms_copy_meter_add(p->meter, MS_COPY_ASM, (size_t)MS_TS_PRE_PMT_PKT);
+    p->pre_pmt_count++;
+    return MS_OK;
+}
+
+static ms_status replay_pre_pmt(ms_ts_parser *p)
+{
+    ms_status st;
+
+    if (p->pre_pmt_replaying || p->pre_pmt == NULL || p->pre_pmt_count == 0 ||
+        !p->have_pmt) {
+        if (p->have_pmt && (p->pre_pmt == NULL || p->pre_pmt_count == 0)) {
+            p->pre_pmt_replayed = 1;
+        }
+        return MS_OK;
+    }
+    p->pre_pmt_replaying = 1;
+    st = announce_pending_tracks(p);
+    if (st != MS_OK) {
+        p->pre_pmt_replaying = 0;
+        return st;
+    }
+    while (p->pre_pmt_sent < p->pre_pmt_count) {
+        int disc = 0;
+        const uint8_t *pkt = p->pre_pmt + p->pre_pmt_sent * (size_t)MS_TS_PRE_PMT_PKT;
+        st = parse_one_packet(p, pkt, &disc);
+        if (st != MS_OK) {
+            p->pre_pmt_replaying = 0;
+            return st;
+        }
+        if (disc) {
+            st = emit_disc(p, NULL);
+            if (st != MS_OK) {
+                p->pre_pmt_replaying = 0;
+                return st;
+            }
+        }
+        p->pre_pmt_sent++;
+        st = announce_pending_tracks(p);
+        if (st != MS_OK) {
+            p->pre_pmt_replaying = 0;
+            return st;
+        }
+    }
+    pre_pmt_free(p);
+    p->pre_pmt_replayed = 1;
+    p->pre_pmt_replaying = 0;
+    return MS_OK;
 }
 
 static ms_status parse_one_packet(ms_ts_parser *p, const uint8_t *ts, int *disc)
@@ -1768,6 +2137,10 @@ static ms_status parse_one_packet(ms_ts_parser *p, const uint8_t *ts, int *disc)
                                 payload, plen);
             }
         }
+        /* 尚无 PMT，或 PID 尚未登记：有界暂存，待首次/新 PMT 后回放。 */
+        if (!p->have_pmt && !p->pre_pmt_replaying) {
+            (void)hold_pre_pmt_packet(p, ts);
+        }
     }
     (void)has_payload;
     return MS_OK;
@@ -1801,6 +2174,12 @@ ms_status ms_ts_parser_push(ms_ts_parser *p,
     if (st != MS_OK) {
         return st;
     }
+    if (p->have_pmt && !p->pre_pmt_replayed) {
+        st = replay_pre_pmt(p);
+        if (st != MS_OK) {
+            return st;
+        }
+    }
     if (p->confirmed && !p->format_emitted) {
         st = emit_format(p);
         if (st != MS_OK) {
@@ -1809,28 +2188,62 @@ ms_status ms_ts_parser_push(ms_ts_parser *p,
     }
 
     if (!p->confirmed) {
-        size_t off = 0;
-        uint16_t psz = 0;
-        if (find_sync(data, size, &off, &psz)) {
+        ms_ts_scan_opt opt;
+        ms_ts_scan_result r;
+        size_t remain_cap;
+        memset(&opt, 0, sizeof(opt));
+        opt.struct_size = sizeof(opt);
+        remain_cap = (p->probe_bytes > p->prefix_bytes)
+                         ? (p->probe_bytes - p->prefix_bytes)
+                         : 0;
+        opt.max_scan = remain_cap;
+        memset(&r, 0, sizeof(r));
+        r.struct_size = sizeof(r);
+        if (remain_cap < (size_t)MS_TS_SYNC_NEEDED * 188u) {
+            fail_parser(p, MS_ERR_UNKNOWN);
+            *consumed = 0;
+            return MS_ERR_UNKNOWN;
+        }
+        st = ms_ts_scan(data, size, eos, &opt, &r);
+        /* 仅在确认 PNG/JPEG 魔术或最终确认偏移后落种类；
+         * 192 包头的前 4 字节在凑齐同步前不要标成 OTHER。 */
+        if (r.kind == MS_TS_PREFIX_PNG || r.kind == MS_TS_PREFIX_JPEG) {
+            p->prefix_kind = r.kind;
+        }
+        if (st == MS_OK) {
             p->confirmed = 1;
-            p->packet_size = psz;
+            p->packet_size = r.packet_size;
             p->resync_spent = 0;
-            pos = off;
+            if (!(r.packet_size == 192 && r.ts_offset < 192 &&
+                  r.kind != MS_TS_PREFIX_PNG && r.kind != MS_TS_PREFIX_JPEG)) {
+                p->prefix_bytes += r.ts_offset;
+            }
+            if (p->prefix_kind == MS_TS_PREFIX_NONE) {
+                p->prefix_kind = r.kind;
+            }
+            if (p->prefix_bytes == 0) {
+                p->prefix_kind = MS_TS_PREFIX_NONE;
+            }
+            pos = r.ts_offset;
             st = emit_format(p);
             if (st != MS_OK) {
                 /* 格式事件未入队时不要把同步前缀丢掉以外的数据标成已消费。 */
-                *consumed = off;
+                *consumed = r.ts_offset;
                 return st;
             }
-            *consumed = off;
-        } else {
-            if (eos || size >= p->probe_bytes) {
-                fail_parser(p, MS_ERR_UNKNOWN);
-                *consumed = 0;
-                return MS_ERR_UNKNOWN;
+            *consumed = r.ts_offset;
+        } else if (st == MS_AGAIN) {
+            size_t drop = r.keep_from;
+            if (drop > size) {
+                drop = size;
             }
-            *consumed = 0;
+            p->prefix_bytes += drop;
+            *consumed = drop;
             return MS_AGAIN;
+        } else {
+            fail_parser(p, st);
+            *consumed = 0;
+            return st;
         }
     }
 
@@ -1857,8 +2270,16 @@ ms_status ms_ts_parser_push(ms_ts_parser *p,
             }
             if (p->resync_spent >= p->max_resync_bytes ||
                 window < (size_t)MS_TS_SYNC_NEEDED * 188u ||
-                !find_sync(data + pos, window, &off, &newpsz)) {
+                !ms_ts_find_sync(data + pos, window, 0, &off, &newpsz)) {
                 size_t spend = window;
+                if (p->tolerant && !eos) {
+                    /* 容错：长段垃圾不判死，丢掉已扫过的字节继续找同步 */
+                    size_t keep = (size_t)MS_TS_SYNC_NEEDED * 204u;
+                    p->resync_spent = 0;
+                    p->tolerated++;
+                    *consumed = pos + (window > keep ? window - keep : 0);
+                    return MS_AGAIN;
+                }
                 if (ms_size_add(p->resync_spent, spend, &p->resync_spent) != 0 ||
                     p->resync_spent >= p->max_resync_bytes) {
                     fail_parser(p, MS_ERR_MALFORMED);
@@ -1899,6 +2320,25 @@ ms_status ms_ts_parser_push(ms_ts_parser *p,
             *consumed = pos;
             return MS_LIMIT;
         }
+        if (st != MS_OK && p->tolerant &&
+            (st == MS_ERR_MALFORMED || st == MS_ERR_OVERFLOW)) {
+            /* 容错：坏包丢弃，PSI 累积复位，媒体 PID 按缺口处理（丢未完成单元并发不连续） */
+            uint16_t bpid = (uint16_t)(((pkt[1] & 0x1F) << 8) | pkt[2]);
+            p->tolerated++;
+            disc = 0;
+            if (bpid == 0) {
+                psi_reset(&p->pat);
+                st = MS_OK;
+            } else if (p->have_pat && bpid == p->pmt_pid) {
+                psi_reset(&p->pmt);
+                st = MS_OK;
+            } else {
+                st = notify_pid_gap(p, bpid);
+                if (st != MS_OK && st != MS_LIMIT) {
+                    st = MS_OK;
+                }
+            }
+        }
         if (st != MS_OK) {
             if (st == MS_ERR_MALFORMED || st == MS_ERR_OVERFLOW ||
                 st == MS_ERR_UNKNOWN || st == MS_ERR_UNSUPPORTED) {
@@ -1906,6 +2346,13 @@ ms_status ms_ts_parser_push(ms_ts_parser *p,
             }
             *consumed = pos;
             return st;
+        }
+        if (p->have_pmt && !p->pre_pmt_replayed) {
+            st = replay_pre_pmt(p);
+            if (st != MS_OK) {
+                *consumed = pos;
+                return st;
+            }
         }
         if (disc) {
             st = emit_disc(p, NULL);

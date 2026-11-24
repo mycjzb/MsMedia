@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+<BaseURL>https://cdn.example.invalid/a/</BaseURL><BaseURL>https://cdn2.example.invalid/a/</BaseURL>
+<Period><AdaptationSet><Representation id="1" bandwidth="1" mimeType="video/mp4" codecs="avc1.42c01e">
+<BaseURL>  file name with spaces &amp; amp.mp4  </BaseURL>
+<SegmentBase indexRange="800-1000"><Initialization range="0-799"/></SegmentBase>
+</Representation></AdaptationSet></Period>
+<?pi target?>
+</MPD>
+<!-- trailing comment -->

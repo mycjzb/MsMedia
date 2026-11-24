@@ -1,0 +1,143 @@
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -2829,6 +2829,15 @@
+                  * 音视频 playlist 仍 catch-up；用户 seek 仍走 hls_read_seek。
+                  * 视频变体重启用不在这里关掉 mpegts ctx：av_read_frame(pls->ctx)
+                  * 假定上下文仍在，关闭后会空指针。 */
++                /* MsMedia: replay subtitle window after probe
++                 * 直播（无 ENDLIST）不可 av_seek_frame，也不能把直播改成
++                 * seekable。find_stream_info 读视频时可能把 c->cur_seq_no
++                 * 推到窗口中后段，select_cur_seq_no 会跳过仍在清单里的片头
++                 * VTT；短 VTT 若在探测中被读完，cur_seq_no 也会越过窗口。
++                 * 首次启用只从当前滑动窗口的 start_seq_no 重开，不缓存全部
++                 * 历史。VOD（finished）仍用上面按时间戳选出的段。 */
++                if (!pls->finished && pls->n_segments > 0)
++                    pls->cur_seq_no = pls->start_seq_no;
+                 avformat_close_input(&pls->ctx);
+                 ff_format_io_close(pls->parent, &pls->input);
+                 pls->input_read_done = 0;
+@@ -3030,6 +3039,21 @@
+                         pls->seek_timestamp = AV_NOPTS_VALUE;
+                         break;
+                     }
++                    /* MsMedia: keep overlapping subtitle cues on seek
++                     * WebVTT 包的 dts 是 cue 起点，duration 是区间。用户
++                     * seek 落到已开始但尚未结束的 cue 内时仍应保留该包。
++                     * end 按与 dts 相同的时基换算后与 seek_timestamp 比较；
++                     * end 为开区间（end <= seek 则丢弃）。已过期 cue 不复活。
++                     * 音视频丢包路径不变。 */
++                    if (pls->is_subtitle && pls->pkt->duration > 0) {
++                        int64_t cue_end = av_rescale_q_rnd(
++                            av_sat_add64(pls->pkt->dts, pls->pkt->duration),
++                            tb, AV_TIME_BASE_Q, AV_ROUND_DOWN);
++                        if (cue_end > pls->seek_timestamp) {
++                            pls->seek_timestamp = AV_NOPTS_VALUE;
++                            break;
++                        }
++                    }
+                 }
+                 av_packet_unref(pls->pkt);
+             }
+--- a/libavformat/webvttdec.c
++++ b/libavformat/webvttdec.c
+@@ -29,13 +29,20 @@
+ #include "internal.h"
+ #include "subtitles.h"
+ #include "libavutil/bprint.h"
++#include "libavutil/common.h"
+ #include "libavutil/intreadwrite.h"
+ #include "libavutil/opt.h"
+ 
++#include <stdlib.h>
++#include <string.h>
++
+ typedef struct {
+     const AVClass *class;
+     FFDemuxSubtitlesQueue q;
+     int kind;
++    int has_ts_map;
++    int64_t map_local_ms;
++    int64_t map_mpegts;
+ } WebVTTContext;
+ 
+ static int webvtt_probe(const AVProbeData *p)
+@@ -58,6 +65,40 @@
+     return AV_NOPTS_VALUE;
+ }
+ 
++/* MsMedia: apply X-TIMESTAMP-MAP
++ * HLS 外挂 WebVTT 用 LOCAL+MPEGTS 把 cue 本地时间映射到 MPEG-TS 90 kHz
++ * 媒体时间。字段顺序不固定。解析失败则保持未映射。 */
++static int parse_webvtt_timestamp_map(const char *p, int64_t *local_ms, int64_t *mpegts)
++{
++    const char *m = strstr(p, "X-TIMESTAMP-MAP=");
++    const char *local_s = NULL, *mpeg_s = NULL, *q;
++    int64_t loc;
++    unsigned long long raw;
++    char *end;
++
++    if (!m)
++        return 0;
++    q = m + 16;
++    while (*q && *q != '\r' && *q != '\n') {
++        if (!strncmp(q, "LOCAL:", 6))
++            local_s = q + 6;
++        else if (!strncmp(q, "MPEGTS:", 7))
++            mpeg_s = q + 7;
++        q++;
++    }
++    if (!local_s || !mpeg_s)
++        return 0;
++    loc = read_ts(local_s);
++    if (loc == AV_NOPTS_VALUE)
++        return 0;
++    raw = strtoull(mpeg_s, &end, 10);
++    if (end == mpeg_s)
++        return 0;
++    *local_ms = loc;
++    *mpegts = (int64_t)raw;
++    return 1;
++}
++
+ static int webvtt_read_header(AVFormatContext *s)
+ {
+     WebVTTContext *webvtt = s->priv_data;
+@@ -92,10 +133,20 @@
+         p = identifier = cue.str;
+         pos = avio_tell(s->pb);
+ 
+-        /* ignore header chunk */
++        /* ignore header chunk; apply X-TIMESTAMP-MAP when present */
+         if (!strncmp(p, "\xEF\xBB\xBFWEBVTT", 9) ||
+             !strncmp(p, "WEBVTT", 6) ||
+-            !strncmp(p, "STYLE", 5) ||
++            !strncmp(p, "X-TIMESTAMP-MAP=", 16)) {
++            if (parse_webvtt_timestamp_map(p, &webvtt->map_local_ms, &webvtt->map_mpegts)) {
++                webvtt->has_ts_map = 1;
++                /* 保持默认 1/1000：HLS header 用 stub「WEBVTT\\n」建主流转
++                 * 时基后不会在每段重开时更新；若这里改 90 kHz，主流转仍按
++                 * 毫秒解释映射后的 pts，时间轴会错位。映射结果换算为毫秒。
++                 * 每个段独立 ctx，可有各自映射（含非零 MEDIA-SEQUENCE）。 */
++            }
++            continue;
++        }
++        if (!strncmp(p, "STYLE", 5) ||
+             !strncmp(p, "REGION", 6) ||
+             !strncmp(p, "NOTE", 4))
+             continue;
+@@ -150,6 +201,15 @@
+         sub->pos = pos;
+         sub->pts = ts_start;
+         sub->duration = ts_end - ts_start;
++        if (webvtt->has_ts_map) {
++            int64_t start_90k = av_sat_add64(webvtt->map_mpegts,
++                av_sat_sub64(ts_start, webvtt->map_local_ms) * 90);
++            int64_t end_90k = av_sat_add64(webvtt->map_mpegts,
++                av_sat_sub64(ts_end, webvtt->map_local_ms) * 90);
++            /* 与默认 1/1000 时基对齐；非整毫秒的 90 kHz 余数向下取整。 */
++            sub->pts = start_90k / 90;
++            sub->duration = (end_90k - start_90k) / 90;
++        }
+ 
+ #define SET_SIDE_DATA(name, type) do {                                  \
+     if (name##_len) {                                                   \

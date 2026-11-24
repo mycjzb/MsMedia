@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 示例：SegmentTemplate + SegmentTimeline，带命名空间 -->
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:cenc="urn:mpeg:cenc:2013"
+     profiles="urn:mpeg:dash:profile:isoff-live:2011" type="static" mediaPresentationDuration="PT0H1M30.000S" minBufferTime="PT2S">
+  <ProgramInformation moreInformationURL="http://example.invalid/?a=1&amp;b=2">
+    <Title>Demo &lt;test&gt; &#x4E2D;&#25991; &quot;q&quot; &apos;a&apos;</Title>
+    <Source><![CDATA[raw <cdata> & stuff]]></Source>
+    <Copyright>(c) MsMedia</Copyright>
+  </ProgramInformation>
+  <BaseURL>http://example.invalid/dash/</BaseURL>
+  <Period id="p0" start="PT0S" duration="PT90S">
+    <AdaptationSet mimeType="video/mp4" segmentAlignment="true" startWithSAP="1" lang='und'>
+      <SupplementalProperty schemeIdUri="urn:mpeg:dash:adaptation-set-switching:2016" value="2"/>
+      <SegmentTemplate timescale="90000" initialization="init-$RepresentationID$.mp4" media="seg-$RepresentationID$-$Number%05d$.m4s" startNumber="1">
+        <SegmentTimeline>
+          <S t="0" d="180000" r="2"/>
+          <S d="90000"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1" bandwidth="800000" codecs="avc1.4d401f" width="640" height="360" frameRate="25"/>
+      <Representation id="v2" bandwidth="1600000" codecs="hvc1.1.6.L93.B0" width="1280" height="720" frameRate="30000/1001"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4" xlink:href="http://example.invalid/x" >
+      <Representation id="a1" bandwidth="128000" codecs="mp4a.40.2" audioSamplingRate="48000">
+        <BaseURL>audio/</BaseURL>
+        <SegmentList duration="2" timescale="1">
+          <Initialization sourceURL="a-init.mp4" range="0-999"/>
+          <SegmentURL media="a-1.m4s" mediaRange="1000-2999"/>
+          <SegmentURL media="a-2.m4s"/>
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>

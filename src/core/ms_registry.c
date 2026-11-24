@@ -40,16 +40,35 @@ ms_status ms_codec_query(ms_codec codec, ms_recog_level *out_level)
     case MS_CODEC_MPEG_AUDIO:    /* TS 0x03/0x04 */
         level = MS_RECOG_CONTAINER_ID;
         break;
-    case MS_CODEC_AVS_PLUS:      /* 需要序列头档次，本阶段不做 */
-    case MS_CODEC_H263:          /* 需要 FLV 等，本阶段无该容器 */
-    case MS_CODEC_AV1:
+    case MS_CODEC_AVS_PLUS:      /* 自写路径无组帧；完整 AU 走 libmsff，须序列头广播类 0x48 */
+    case MS_CODEC_H263:          /* 自写路径无 H.263 组帧；完整 AU 走 libmsff */
+    case MS_CODEC_AV1:           /* 自写路径无 AV1 组帧；完整 AU 走 libmsff */
     case MS_CODEC_MP3:           /* 未确认 layer，不得从 0x03/0x04 直接给出 */
     case MS_CODEC_MP2:
     case MS_CODEC_OPUS:
     case MS_CODEC_G711_ALAW:
     case MS_CODEC_G711_ULAW:
+    case MS_CODEC_FLAC:          /* 自写路径无组帧；完整 AU 走 libmsff，不是软解 */
+    case MS_CODEC_PCM:           /* 线性 PCM 直出，不是压缩软解 */
+    case MS_CODEC_DTS:           /* 仅单 so 路线 B：ms_ff 解复用 + 系统/FFmpeg 解码 */
+    case MS_CODEC_AAC_LATM:
     case MS_CODEC_UNKNOWN:
         level = MS_RECOG_NONE;
+        break;
+    case MS_CODEC_SUB_TEXT:
+    case MS_CODEC_SUB_SRT:
+    case MS_CODEC_SUB_WEBVTT:
+    case MS_CODEC_SUB_TX3G:
+    case MS_CODEC_SUB_ASS:
+        level = MS_RECOG_AU; /* 文本 cue 有界解析（ASS 为布局模型），不是软解或完整渲染 */
+        break;
+    case MS_CODEC_SUB_DVB:
+    case MS_CODEC_SUB_PGS:
+    case MS_CODEC_SUB_VOBSUB:
+        level = MS_RECOG_AU; /* 位图解析为 RGBA cue，不是视频软解 */
+        break;
+    case MS_CODEC_SUB_BITMAP:
+        level = MS_RECOG_CONTAINER_ID; /* 未细分族（XSUB/图文等）仍不解析 */
         break;
     default:
         *out_level = MS_RECOG_NONE;

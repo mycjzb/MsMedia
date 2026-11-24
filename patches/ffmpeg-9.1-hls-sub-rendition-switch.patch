@@ -1,0 +1,22 @@
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -2821,7 +2821,18 @@
+             pls->cur_seq_no = select_cur_seq_no(c, pls);
+             pls->first_read_seq_no = -1;
+             pls->pb.pub.eof_reached = 0;
+-            if (c->cur_timestamp != AV_NOPTS_VALUE) {
++            if (pls->is_subtitle) {
++                /* MsMedia: do not catch-up-drop subtitle cues
++                 * 再次启用字幕 rendition 时关掉上次残留的 webvtt 上下文，
++                 * 否则 av_read_frame 会在已耗尽的 ctx 上立刻 EOF。
++                 * 新打开的外链也不按当前媒体时间丢掉本段内 start < now 的 cue。
++                 * 音视频 playlist 仍 catch-up；用户 seek 仍走 hls_read_seek。
++                 * 视频变体重启用不在这里关掉 mpegts ctx：av_read_frame(pls->ctx)
++                 * 假定上下文仍在，关闭后会空指针。 */
++                avformat_close_input(&pls->ctx);
++                ff_format_io_close(pls->parent, &pls->input);
++                pls->input_read_done = 0;
++            } else if (c->cur_timestamp != AV_NOPTS_VALUE) {
+                 /* catch up */
+                 pls->seek_timestamp = av_sat_add64(c->cur_timestamp,
+                     pls->ts_offset != AV_NOPTS_VALUE ? pls->ts_offset : 0);

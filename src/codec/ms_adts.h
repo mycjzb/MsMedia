@@ -39,6 +39,9 @@ typedef struct ms_adts_frame {
     int audio_object_type;
     int sample_rate;
     int channels;
+    uint8_t *owned_base;
+    size_t owned_cap;
+    int *owned_taken;
 } ms_adts_frame;
 
 typedef struct ms_adts_callbacks {
@@ -74,7 +77,10 @@ typedef struct ms_adts {
     int last_aot;
     int failed;
     ms_status fail_status;
+    ms_copy_meter *meter;
 } ms_adts;
+
+void ms_adts_set_meter(ms_adts *a, ms_copy_meter *m);
 
 void ms_adts_init(ms_adts *a,
                   const ms_allocator *alloc,
@@ -83,6 +89,8 @@ void ms_adts_init(ms_adts *a,
 void ms_adts_destroy(ms_adts *a);
 void ms_adts_reset(ms_adts *a);          /* 丢掉缓冲和 config */
 void ms_adts_flush_partial(ms_adts *a);  /* 丢掉未完成/未发出的字节，保留 config */
+/* 容错模式（仅单 so 网络输入启用）：清除失败态并丢掉未完成字节，保留 config，按同步字重新对齐。 */
+void ms_adts_recover(ms_adts *a);
 
 /* 新的 PES 载荷开始。未完成的上一帧仍沿用它开始时的时间戳。 */
 void ms_adts_begin_pes(ms_adts *a, int has_pts, uint64_t pts, int has_dts, uint64_t dts);

@@ -1,0 +1,16 @@
+MSMEDIA_1.0 {
+  global:
+    ms_ass_render_caps_default;
+    ms_ass_render_opts_default;
+    ms_ass_render_query_caps;
+    ms_ass_render_create;
+    ms_ass_render_destroy;
+    ms_ass_render_set_header;
+    ms_ass_render_set_script;
+    ms_ass_render_add_event;
+    ms_ass_render_clear_events;
+    ms_ass_render_set_canvas;
+    ms_ass_render_at;
+  local:
+    *;
+};

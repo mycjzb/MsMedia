@@ -175,6 +175,21 @@ int ms_synth_pat_pmt_version(ms_synth_buf *b,
                              uint16_t packet_size,
                              unsigned version)
 {
+    return ms_synth_pat_pmt_info(b, program_number, pmt_pid, streams, nstreams,
+                                 null_packets, packet_size, version, NULL, 0);
+}
+
+int ms_synth_pat_pmt_info(ms_synth_buf *b,
+                          uint16_t program_number,
+                          uint16_t pmt_pid,
+                          const ms_synth_stream *streams,
+                          int nstreams,
+                          int null_packets,
+                          uint16_t packet_size,
+                          unsigned version,
+                          const uint8_t *program_info,
+                          uint16_t program_info_size)
+{
     uint8_t pat[32];
     uint8_t pmt[256];
     size_t plen;
@@ -218,12 +233,23 @@ int ms_synth_pat_pmt_version(ms_synth_buf *b,
         pmt[8] = (uint8_t)(0xE0 | ((pcr >> 8) & 0x1F));
         pmt[9] = (uint8_t)pcr;
     }
-    pmt[10] = 0xF0;
-    pmt[11] = 0x00;
-    plen = 12;
+    if (program_info != NULL && program_info_size > 0) {
+        if (12u + (unsigned)program_info_size + 16u >= sizeof(pmt)) {
+            return -1;
+        }
+        pmt[10] = (uint8_t)(0xF0 | ((program_info_size >> 8) & 0x0F));
+        pmt[11] = (uint8_t)program_info_size;
+        memcpy(pmt + 12, program_info, program_info_size);
+        plen = 12u + (size_t)program_info_size;
+    } else {
+        pmt[10] = 0xF0;
+        pmt[11] = 0x00;
+        plen = 12;
+    }
+    (void)program_info;
     for (i = 0; i < nstreams; i++) {
         uint16_t es_len = 0;
-        if (plen + 5 + 8 >= sizeof(pmt)) {
+        if (plen + 5 + 8 + 16 >= sizeof(pmt)) {
             return -1;
         }
         pmt[plen++] = streams[i].stream_type;
@@ -232,15 +258,25 @@ int ms_synth_pat_pmt_version(ms_synth_buf *b,
         if (streams[i].language[0] != 0) {
             es_len = 6;
         }
+        if (streams[i].es_descriptor != NULL && streams[i].es_descriptor_size > 0) {
+            es_len = (uint16_t)(es_len + streams[i].es_descriptor_size);
+        }
         pmt[plen++] = (uint8_t)(0xF0 | ((es_len >> 8) & 0x0F));
         pmt[plen++] = (uint8_t)es_len;
-        if (es_len == 6) {
+        if (streams[i].language[0] != 0) {
             pmt[plen++] = 0x0A;
             pmt[plen++] = 0x04;
             pmt[plen++] = (uint8_t)streams[i].language[0];
             pmt[plen++] = (uint8_t)streams[i].language[1];
             pmt[plen++] = (uint8_t)streams[i].language[2];
             pmt[plen++] = 0x00;
+        }
+        if (streams[i].es_descriptor != NULL && streams[i].es_descriptor_size > 0) {
+            if (plen + streams[i].es_descriptor_size >= sizeof(pmt)) {
+                return -1;
+            }
+            memcpy(pmt + plen, streams[i].es_descriptor, streams[i].es_descriptor_size);
+            plen += streams[i].es_descriptor_size;
         }
     }
     finish_section(pmt, &plen);
@@ -327,27 +363,43 @@ static int synth_pes_write(ms_synth_buf *b,
         uint8_t pkt[188];
         size_t room;
         size_t chunk;
+        size_t stuff = 0;
+        size_t pay_off;
         uint8_t cc = next_cc(pid);
         const uint8_t *src;
         memset(pkt, 0xFF, sizeof(pkt));
         pkt[0] = 0x47;
         pkt[1] = (uint8_t)((first ? 0x40 : 0x00) | ((pid >> 8) & 0x1F));
         pkt[2] = (uint8_t)(pid & 0xFF);
-        pkt[3] = (uint8_t)(0x10 | (cc & 0x0F));
         room = 184;
         chunk = ((total - off) < room) ? (total - off) : room;
+        /* 最后一包若不满 184，必须用 adaptation stuffing，不能把 0xFF 当 PES 载荷。 */
+        if (chunk < room) {
+            stuff = room - chunk;
+        }
+        if (stuff > 0) {
+            pkt[3] = (uint8_t)(0x30 | (cc & 0x0F));
+            pkt[4] = (uint8_t)(stuff - 1u);
+            if (stuff >= 2u) {
+                pkt[5] = 0x00; /* 无 PCR/flags，其余已是 0xFF */
+            }
+            pay_off = 4u + stuff;
+        } else {
+            pkt[3] = (uint8_t)(0x10 | (cc & 0x0F));
+            pay_off = 4;
+        }
         if (off < hlen) {
             size_t from_h = hlen - off;
             if (from_h > chunk) {
                 from_h = chunk;
             }
-            memcpy(pkt + 4, header + off, from_h);
+            memcpy(pkt + pay_off, header + off, from_h);
             if (from_h < chunk && payload != NULL) {
-                memcpy(pkt + 4 + from_h, payload, chunk - from_h);
+                memcpy(pkt + pay_off + from_h, payload, chunk - from_h);
             }
         } else {
             src = payload + (off - hlen);
-            memcpy(pkt + 4, src, chunk);
+            memcpy(pkt + pay_off, src, chunk);
         }
         if (append_unit(b, pkt, packet_size) != 0) {
             return -1;

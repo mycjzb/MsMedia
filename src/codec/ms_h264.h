@@ -57,6 +57,8 @@ typedef struct ms_h264_sps {
     unsigned log2_max_poc_lsb_minus4;
     int delta_poc_always_zero;
     int frame_mbs_only;
+    int width;  /* 显示宽，含裁剪；未能读裁剪时为宏块对齐编码宽 */
+    int height;
     uint8_t *nal;
     size_t nal_len;
     size_t nal_cap;
@@ -135,7 +137,10 @@ typedef struct ms_h264 {
     int started; /* 已成功发出过 IDR，此后才发出非 IDR */
     int failed;
     ms_status fail_status;
+    ms_copy_meter *meter;
 } ms_h264;
+
+void ms_h264_set_meter(ms_h264 *h, ms_copy_meter *m);
 
 void ms_h264_init(ms_h264 *h,
                   const ms_allocator *alloc,
@@ -144,6 +149,8 @@ void ms_h264_init(ms_h264 *h,
 void ms_h264_destroy(ms_h264 *h);
 void ms_h264_reset(ms_h264 *h);
 void ms_h264_flush_partial(ms_h264 *h); /* 丢掉未完成 AU，保留已解析的 SPS/PPS */
+/* 容错模式（仅单 so 网络输入启用）：清除失败态并丢掉未完成 AU，保留 SPS/PPS，从下一个起始码继续。 */
+void ms_h264_recover(ms_h264 *h);
 
 void ms_h264_begin_pes(ms_h264 *h, int has_pts, uint64_t pts, int has_dts, uint64_t dts);
 

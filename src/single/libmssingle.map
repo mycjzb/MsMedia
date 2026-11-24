@@ -1,0 +1,14 @@
+/*
+ * 单 so（统一交付名 libmsplayer.so）导出表：只导出 JNI 入口。
+ * 纯自研/精简 FFmpeg 单 so 都由 Java System.loadLibrary("msplayer") 加载，
+ * 内部 ms_* / ms_hw_* / ms_ff_* 一律不进动态符号表，便于 --gc-sections 与 ICF 收缩。
+ * 公共 C ABI v1（MSMEDIA_1.0）仍由原多 so 构建（build.sh / android_hw_build.sh）提供，本表不改其布局。
+ * by: Long <mycjzb@gmail.com>
+ */
+MSMEDIA_SINGLE_1.0 {
+  global:
+    JNI_OnLoad;
+    Java_com_msmedia_*;
+  local:
+    *;
+};

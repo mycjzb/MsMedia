@@ -1,0 +1,18 @@
+# Official FFmpeg 9.1 pin. Do not auto-upgrade.
+# Verified 2026-11-20 (Asia/Shanghai) against https://ffmpeg.org/download.html
+# and https://ffmpeg.org/releases/
+version=9.1
+codename=Gauss
+released=2026-11-20
+branch_cut_from_master=2026-10-24
+tarball_url=https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz
+signature_url=https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz.asc
+pgp_key_url=https://ffmpeg.org/ffmpeg-devel.asc
+pgp_key_fingerprint=FCF986EA15E6E293A5644F10B4322F04D67658D8
+tarball_sha256=1a4d394ae63d190a526cd052eb4415c156b5c5e2df37efab41a7de0b8fde2433
+# Official verification is PGP (FFmpeg does not publish SHA-256). The hash
+# above was computed locally after gpg --verify reported a Good signature
+# from the official release signing key imported from ffmpeg.org.
+libavutil=61.19.100
+libavcodec=63.24.100
+libavformat=63.16.100

@@ -43,6 +43,13 @@ void ms_h264_init(ms_h264 *h,
     }
 }
 
+void ms_h264_set_meter(ms_h264 *h, ms_copy_meter *m)
+{
+    if (h != NULL) {
+        h->meter = m;
+    }
+}
+
 void ms_h264_destroy(ms_h264 *h)
 {
     if (h == NULL) {
@@ -85,8 +92,12 @@ void ms_h264_reset(ms_h264 *h)
     alloc = h->alloc;
     max_au = h->max_au;
     cb = h->cb;
-    ms_h264_destroy(h);
-    ms_h264_init(h, alloc, max_au, &cb);
+    {
+        ms_copy_meter *meter = h->meter;
+        ms_h264_destroy(h);
+        ms_h264_init(h, alloc, max_au, &cb);
+        h->meter = meter;
+    }
 }
 
 void ms_h264_flush_partial(ms_h264 *h)
@@ -102,6 +113,16 @@ void ms_h264_flush_partial(ms_h264 *h)
     h->pes_ts_available = 0;
     clear_au_state(h);
     /* SPS/PPS 与 config_dirty 保留 */
+}
+
+void ms_h264_recover(ms_h264 *h)
+{
+    if (h == NULL) {
+        return;
+    }
+    ms_h264_flush_partial(h);
+    h->failed = 0;
+    h->fail_status = MS_OK;
 }
 
 void ms_h264_begin_pes(ms_h264 *h, int has_pts, uint64_t pts, int has_dts, uint64_t dts)
@@ -332,6 +353,7 @@ static int parse_sps(const uint8_t *nal, size_t nal_len, ms_h264_sps *out)
     unsigned profile = 0, flags = 0, level = 0, sps_id = 0;
     unsigned tmp = 0, poc_type = 0, width = 0, height = 0, fmo = 0;
     unsigned log2_fn = 0, log2_poc = 0;
+    unsigned chroma = 1; /* 非 high profile 时规范默认 4:2:0 */
     int delta_always = 0;
     const uint8_t *body;
     size_t body_len;
@@ -361,7 +383,8 @@ static int parse_sps(const uint8_t *nal, size_t nal_len, ms_h264_sps *out)
         return -1;
     }
     if (high_profile(profile)) {
-        unsigned chroma = 0, present = 0, nlist, i;
+        unsigned present = 0, nlist, i;
+        chroma = 0;
         if (br_ue(&br, &chroma) != 0) {
             return -1;
         }
@@ -431,8 +454,6 @@ static int parse_sps(const uint8_t *nal, size_t nal_len, ms_h264_sps *out)
         br_u(&br, 1, &fmo) != 0) {
         return -1;
     }
-    (void)width;
-    (void)height;
     if (fmo == 0) {
         /* 隔行或 PAFF；若随后 mb_adaptive_frame_field_flag=1 则还是 MBAFF。一律拒绝。 */
         return 1;
@@ -444,6 +465,35 @@ static int parse_sps(const uint8_t *nal, size_t nal_len, ms_h264_sps *out)
     out->log2_max_poc_lsb_minus4 = log2_poc;
     out->delta_poc_always_zero = delta_always;
     out->frame_mbs_only = 1;
+    /* pic_width/height_in_mbs 是 minus1。frame_mbs_only=1 时编码高即 map_units*16。 */
+    out->width = (int)((width + 1u) * 16u);
+    out->height = (int)((height + 1u) * 16u);
+    {
+        unsigned d8 = 0, crop_flag = 0;
+        /* 裁剪读失败不推翻已接受的 SPS，保留宏块对齐尺寸。 */
+        if (br_u(&br, 1, &d8) == 0 && br_u(&br, 1, &crop_flag) == 0 && crop_flag) {
+            unsigned cl = 0, cr = 0, ct = 0, cb = 0;
+            if (br_ue(&br, &cl) == 0 && br_ue(&br, &cr) == 0 &&
+                br_ue(&br, &ct) == 0 && br_ue(&br, &cb) == 0) {
+                unsigned sub_w = 2, sub_h = 2;
+                int w2, h2;
+                if (chroma == 0u || chroma == 3u) {
+                    sub_w = 1;
+                    sub_h = 1;
+                } else if (chroma == 2u) {
+                    sub_w = 2;
+                    sub_h = 1;
+                }
+                w2 = out->width - (int)((cl + cr) * sub_w);
+                h2 = out->height - (int)((ct + cb) * sub_h);
+                if (w2 > 0 && h2 > 0) {
+                    out->width = w2;
+                    out->height = h2;
+                }
+            }
+        }
+        (void)d8;
+    }
     return 0;
 }
 
@@ -867,21 +917,56 @@ static ms_status emit_au(ms_h264 *h, size_t end)
     fr.dts = h->start_dts;
     fr.format_changed = changed;
     fr.is_keyframe = h->have_idr ? 1 : 0;
-    if (h->cb.on_au != NULL) {
-        st = h->cb.on_au(h->cb.ctx, &fr);
-        if (st != MS_OK) {
-            /* config 已发出则 dirty 已清；AU 仍留在缓冲，重试时不再重复 config。 */
-            return st;
+    {
+        int taken = 0;
+        uint8_t *rem_buf = NULL;
+        size_t rem_n = (end < h->len) ? (h->len - end) : 0;
+        size_t rem_cap = 0;
+        if (h->buf != NULL && end > 0) {
+            if (rem_n > 0) {
+                rem_buf = (uint8_t *)ms_mem_alloc(h->alloc, rem_n);
+                if (rem_buf != NULL) {
+                    memcpy(rem_buf, h->buf + end, rem_n);
+                    ms_copy_meter_add(h->meter, MS_COPY_ASM, rem_n);
+                    rem_cap = rem_n;
+                    fr.owned_base = h->buf;
+                    fr.owned_cap = h->cap;
+                    fr.owned_taken = &taken;
+                }
+            } else {
+                fr.owned_base = h->buf;
+                fr.owned_cap = h->cap;
+                fr.owned_taken = &taken;
+            }
         }
-    }
-    if (h->have_idr) {
-        h->started = 1;
-    }
-    if (end < h->len) {
-        memmove(h->buf, h->buf + end, h->len - end);
-        h->len -= end;
-    } else {
-        h->len = 0;
+        if (h->cb.on_au != NULL) {
+            st = h->cb.on_au(h->cb.ctx, &fr);
+            if (st != MS_OK) {
+                if (rem_buf != NULL) {
+                    ms_mem_free(h->alloc, rem_buf);
+                }
+                /* config 已发出则 dirty 已清；AU 仍留在缓冲，重试时不再重复 config。 */
+                return st;
+            }
+        }
+        if (h->have_idr) {
+            h->started = 1;
+        }
+        if (taken) {
+            h->buf = rem_buf;
+            h->cap = rem_cap;
+            h->len = rem_n;
+        } else {
+            if (rem_buf != NULL) {
+                ms_mem_free(h->alloc, rem_buf);
+            }
+            if (end < h->len) {
+                memmove(h->buf, h->buf + end, h->len - end);
+                h->len -= end;
+            } else {
+                h->len = 0;
+            }
+        }
     }
     if (h->parsed >= end) {
         h->parsed -= end;
@@ -1322,6 +1407,7 @@ ms_status ms_h264_push(ms_h264 *h, const uint8_t *data, size_t size, size_t *con
             return st;
         }
         memcpy(h->buf + h->len, data, chunk);
+        ms_copy_meter_add(h->meter, MS_COPY_ASM, chunk);
         h->len = need;
         attach_start_ts(h);
         data += chunk;
@@ -1347,4 +1433,378 @@ ms_status ms_h264_end(ms_h264 *h)
         return h->fail_status;
     }
     return drain_buf(h, 1);
+}
+
+/* ---------- 公共：从 AU/CSD 提取本缓冲内成对 SPS/PPS ---------- */
+
+typedef struct {
+    uint8_t nal[MS_H264_PS_NAL_MAX];
+    size_t n;
+    unsigned id;
+    unsigned sps_id; /* only PPS */
+} ps_nal;
+
+static const uint8_t *ps_start(const uint8_t *p, const uint8_t *end, size_t *sc)
+{
+    const uint8_t *q;
+    for (q = p; q + 3 <= end; q++) {
+        if (q[0] == 0 && q[1] == 0 && q[2] == 1) {
+            *sc = 3;
+            return q;
+        }
+        if (q + 4 <= end && q[0] == 0 && q[1] == 0 && q[2] == 0 && q[3] == 1) {
+            *sc = 4;
+            return q;
+        }
+    }
+    return NULL;
+}
+
+static ms_status ps_store(ps_nal *slots, int *n, const uint8_t *nal, size_t nn,
+                          unsigned id, unsigned sps_id)
+{
+    if (nn == 0) {
+        return MS_OK;
+    }
+    if (nn > MS_H264_PS_NAL_MAX) {
+        return MS_ERR_OVERFLOW;
+    }
+    if (*n < MS_H264_PS_SLOT_MAX) {
+        memcpy(slots[*n].nal, nal, nn);
+        slots[*n].n = nn;
+        slots[*n].id = id;
+        slots[*n].sps_id = sps_id;
+        (*n)++;
+    } else {
+        /* 有界：只保留最近 SLOT_MAX 个，挤掉最旧的。 */
+        memmove(&slots[0], &slots[1], sizeof(slots[0]) * (MS_H264_PS_SLOT_MAX - 1));
+        memcpy(slots[MS_H264_PS_SLOT_MAX - 1].nal, nal, nn);
+        slots[MS_H264_PS_SLOT_MAX - 1].n = nn;
+        slots[MS_H264_PS_SLOT_MAX - 1].id = id;
+        slots[MS_H264_PS_SLOT_MAX - 1].sps_id = sps_id;
+    }
+    return MS_OK;
+}
+
+static ms_status ps_take_nal(const uint8_t *nal, size_t nn, ps_nal *sps, int *ns,
+                             ps_nal *pps, int *np)
+{
+    unsigned typ;
+    if (nal == NULL || nn == 0) {
+        return MS_OK;
+    }
+    typ = (unsigned)(nal[0] & 0x1fu);
+    if (typ == 7u) {
+        ms_h264_sps tmp;
+        if (parse_sps(nal, nn, &tmp) != 0) {
+            return MS_OK; /* 无法解析则忽略，不当成可应用配置 */
+        }
+        return ps_store(sps, ns, nal, nn, tmp.id, tmp.id);
+    }
+    if (typ == 8u) {
+        ms_h264_pps tmp;
+        if (parse_pps(nal, nn, &tmp) != 0) {
+            return MS_OK;
+        }
+        return ps_store(pps, np, nal, nn, tmp.id, tmp.sps_id);
+    }
+    return MS_OK;
+}
+
+static void ps_pick_pair(const ps_nal *sps, int ns, const ps_nal *pps, int np,
+                         ms_h264_ps_set *out)
+{
+    int i, j;
+    memset(out, 0, sizeof(*out));
+    out->struct_size = sizeof(*out);
+    if (ns > 0) {
+        out->have_sps = 1;
+        out->sps_size = sps[ns - 1].n;
+        memcpy(out->sps, sps[ns - 1].nal, sps[ns - 1].n);
+        out->sps_id = sps[ns - 1].id;
+    }
+    if (np > 0) {
+        out->have_pps = 1;
+        out->pps_size = pps[np - 1].n;
+        memcpy(out->pps, pps[np - 1].nal, pps[np - 1].n);
+        out->pps_id = pps[np - 1].id;
+        out->pps_sps_id = pps[np - 1].sps_id;
+    }
+    /* 只在本缓冲内配对：从后往前找 PPS 与同缓冲 SPS.id 匹配，不拼接旧集。 */
+    for (i = np - 1; i >= 0; i--) {
+        for (j = ns - 1; j >= 0; j--) {
+            if (pps[i].sps_id == sps[j].id) {
+                out->have_sps = 1;
+                out->have_pps = 1;
+                out->sps_size = sps[j].n;
+                memcpy(out->sps, sps[j].nal, sps[j].n);
+                out->sps_id = sps[j].id;
+                out->pps_size = pps[i].n;
+                memcpy(out->pps, pps[i].nal, pps[i].n);
+                out->pps_id = pps[i].id;
+                out->pps_sps_id = pps[i].sps_id;
+                out->pair_complete = 1;
+                return;
+            }
+        }
+    }
+}
+
+static ms_status ps_walk_annexb(const uint8_t *d, size_t n, ps_nal *sps, int *ns,
+                                ps_nal *pps, int *np)
+{
+    const uint8_t *end = d + n;
+    const uint8_t *p = d;
+    while (p < end) {
+        size_t sc = 0;
+        const uint8_t *nal;
+        const uint8_t *next;
+        size_t nn;
+        ms_status st;
+        nal = ps_start(p, end, &sc);
+        if (nal == NULL) {
+            break;
+        }
+        nal += sc;
+        next = ps_start(nal, end, &sc);
+        nn = (size_t)((next ? next : end) - nal);
+        st = ps_take_nal(nal, nn, sps, ns, pps, np);
+        if (st != MS_OK) {
+            return st;
+        }
+        p = next ? next : end;
+    }
+    return MS_OK;
+}
+
+static ms_status ps_walk_avcc_sample(const uint8_t *d, size_t n, unsigned ls,
+                                     ps_nal *sps, int *ns, ps_nal *pps, int *np)
+{
+    size_t off = 0;
+    if (ls == 0) {
+        ls = 4;
+    }
+    if (ls > 4) {
+        return MS_ERR_MALFORMED;
+    }
+    while (off < n) {
+        uint64_t nalsz = 0;
+        unsigned k;
+        ms_status st;
+        if (off + ls > n) {
+            return MS_ERR_MALFORMED;
+        }
+        for (k = 0; k < ls; k++) {
+            nalsz = (nalsz << 8) | (uint64_t)d[off + k];
+        }
+        off += ls;
+        if (nalsz == 0 || off + nalsz > n) {
+            return MS_ERR_MALFORMED;
+        }
+        st = ps_take_nal(d + off, (size_t)nalsz, sps, ns, pps, np);
+        if (st != MS_OK) {
+            return st;
+        }
+        off += (size_t)nalsz;
+    }
+    return MS_OK;
+}
+
+static ms_status ps_walk_avcc_cfg(const uint8_t *d, size_t n, ps_nal *sps, int *ns,
+                                  ps_nal *pps, int *np, unsigned *out_ls)
+{
+    size_t off;
+    unsigned i, nSPS, nPPS, ls;
+    if (n < 7 || d[0] != 1) {
+        return MS_ERR_MALFORMED;
+    }
+    ls = (unsigned)((d[4] & 3u) + 1u);
+    if (out_ls) {
+        *out_ls = ls;
+    }
+    off = 5;
+    nSPS = (unsigned)(d[off++] & 0x1fu);
+    for (i = 0; i < nSPS; i++) {
+        unsigned ln;
+        ms_status st;
+        if (off + 2 > n) {
+            return MS_ERR_MALFORMED;
+        }
+        ln = ((unsigned)d[off] << 8) | (unsigned)d[off + 1];
+        off += 2;
+        if (ln == 0 || off + ln > n) {
+            return MS_ERR_MALFORMED;
+        }
+        st = ps_take_nal(d + off, ln, sps, ns, pps, np);
+        if (st != MS_OK) {
+            return st;
+        }
+        off += ln;
+    }
+    if (off >= n) {
+        return MS_OK;
+    }
+    nPPS = (unsigned)d[off++];
+    for (i = 0; i < nPPS; i++) {
+        unsigned ln;
+        ms_status st;
+        if (off + 2 > n) {
+            return MS_ERR_MALFORMED;
+        }
+        ln = ((unsigned)d[off] << 8) | (unsigned)d[off + 1];
+        off += 2;
+        if (ln == 0 || off + ln > n) {
+            return MS_ERR_MALFORMED;
+        }
+        st = ps_take_nal(d + off, ln, sps, ns, pps, np);
+        if (st != MS_OK) {
+            return st;
+        }
+        off += ln;
+    }
+    return MS_OK;
+}
+
+ms_status ms_h264_ps_parse(ms_sample_format fmt, int is_csd, const uint8_t *data,
+                           size_t size, unsigned nal_len_size, ms_h264_ps_set *out)
+{
+    ps_nal sps[MS_H264_PS_SLOT_MAX];
+    ps_nal pps[MS_H264_PS_SLOT_MAX];
+    int ns = 0, np = 0;
+    ms_status st;
+    if (out == NULL) {
+        return MS_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    out->struct_size = sizeof(*out);
+    if (data == NULL || size == 0) {
+        return MS_OK;
+    }
+    if (fmt == MS_SAMPLE_FMT_ANNEXB ||
+        (fmt == MS_SAMPLE_FMT_UNKNOWN && !is_csd)) {
+        st = ps_walk_annexb(data, size, sps, &ns, pps, &np);
+    } else if (fmt == MS_SAMPLE_FMT_AVCC && is_csd) {
+        st = ps_walk_avcc_cfg(data, size, sps, &ns, pps, &np, NULL);
+    } else if (fmt == MS_SAMPLE_FMT_AVCC) {
+        st = ps_walk_avcc_sample(data, size, nal_len_size, sps, &ns, pps, &np);
+    } else if (fmt == MS_SAMPLE_FMT_UNKNOWN && is_csd && size >= 7 && data[0] == 1) {
+        st = ps_walk_avcc_cfg(data, size, sps, &ns, pps, &np, NULL);
+    } else if (fmt == MS_SAMPLE_FMT_UNKNOWN && is_csd) {
+        st = ps_walk_annexb(data, size, sps, &ns, pps, &np);
+    } else {
+        return MS_ERR_UNSUPPORTED;
+    }
+    if (st != MS_OK) {
+        memset(out, 0, sizeof(*out));
+        out->struct_size = sizeof(*out);
+        return st;
+    }
+    ps_pick_pair(sps, ns, pps, np, out);
+    return MS_OK;
+}
+
+ms_status ms_h264_csd_video_size(ms_sample_format fmt, int is_csd,
+                                 const uint8_t *data, size_t size,
+                                 unsigned nal_len_size, int *width, int *height)
+{
+    ms_h264_ps_set ps;
+    ms_h264_sps tmp;
+    ms_status st;
+    if (width == NULL || height == NULL) {
+        return MS_ERR_INVALID_ARG;
+    }
+    *width = 0;
+    *height = 0;
+    memset(&ps, 0, sizeof(ps));
+    ps.struct_size = sizeof(ps);
+    st = ms_h264_ps_parse(fmt, is_csd, data, size, nal_len_size, &ps);
+    if (st != MS_OK) {
+        return st;
+    }
+    if (!ps.have_sps || ps.sps_size == 0) {
+        return MS_OK;
+    }
+    if (parse_sps(ps.sps, ps.sps_size, &tmp) != 0 || tmp.width <= 0 || tmp.height <= 0) {
+        return MS_OK;
+    }
+    *width = tmp.width;
+    *height = tmp.height;
+    return MS_OK;
+}
+
+int ms_h264_ps_equal(const ms_h264_ps_set *a, const ms_h264_ps_set *b)
+{
+    if (a == NULL || b == NULL) {
+        return 0;
+    }
+    if (!a->pair_complete || !b->pair_complete) {
+        return 0;
+    }
+    if (a->sps_size != b->sps_size || a->pps_size != b->pps_size) {
+        return 0;
+    }
+    if (a->sps_size > 0 && memcmp(a->sps, b->sps, a->sps_size) != 0) {
+        return 0;
+    }
+    if (a->pps_size > 0 && memcmp(a->pps, b->pps, a->pps_size) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+ms_status ms_h264_ps_pack(ms_sample_format fmt, unsigned nal_len_size,
+                          const ms_h264_ps_set *in, uint8_t *out, size_t cap,
+                          size_t *out_size)
+{
+    size_t n = 0;
+    if (in == NULL || !in->pair_complete || out == NULL || out_size == NULL) {
+        return MS_ERR_INVALID_ARG;
+    }
+    *out_size = 0;
+    if (fmt == MS_SAMPLE_FMT_AVCC) {
+        unsigned ls = nal_len_size ? nal_len_size : 4u;
+        if (ls < 1 || ls > 4) {
+            return MS_ERR_INVALID_ARG;
+        }
+        if (6 + 2 + in->sps_size + 1 + 2 + in->pps_size > cap) {
+            return MS_ERR_OVERFLOW;
+        }
+        out[n++] = 1;
+        out[n++] = (in->sps_size >= 2) ? in->sps[1] : 0;
+        out[n++] = (in->sps_size >= 3) ? in->sps[2] : 0;
+        out[n++] = (in->sps_size >= 4) ? in->sps[3] : 0;
+        out[n++] = (uint8_t)(0xFCu | ((ls - 1u) & 3u));
+        out[n++] = (uint8_t)(0xE0u | 1u);
+        out[n++] = (uint8_t)((in->sps_size >> 8) & 0xFFu);
+        out[n++] = (uint8_t)(in->sps_size & 0xFFu);
+        memcpy(out + n, in->sps, in->sps_size);
+        n += in->sps_size;
+        out[n++] = 1;
+        out[n++] = (uint8_t)((in->pps_size >> 8) & 0xFFu);
+        out[n++] = (uint8_t)(in->pps_size & 0xFFu);
+        memcpy(out + n, in->pps, in->pps_size);
+        n += in->pps_size;
+        *out_size = n;
+        return MS_OK;
+    }
+    if (fmt != MS_SAMPLE_FMT_ANNEXB && fmt != MS_SAMPLE_FMT_UNKNOWN) {
+        return MS_ERR_UNSUPPORTED;
+    }
+    if (8 + in->sps_size + in->pps_size > cap) {
+        return MS_ERR_OVERFLOW;
+    }
+    out[n++] = 0;
+    out[n++] = 0;
+    out[n++] = 0;
+    out[n++] = 1;
+    memcpy(out + n, in->sps, in->sps_size);
+    n += in->sps_size;
+    out[n++] = 0;
+    out[n++] = 0;
+    out[n++] = 0;
+    out[n++] = 1;
+    memcpy(out + n, in->pps, in->pps_size);
+    n += in->pps_size;
+    *out_size = n;
+    return MS_OK;
 }

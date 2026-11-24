@@ -112,3 +112,22 @@ cat "$OUTDIR/part_a.ts" "$OUTDIR/part_b.ts" > "$OUTDIR/concat_disc.ts"
 
 export OUTDIR FFMPEG FFPROBE INSPECT REPORT
 python3 "$ROOT/tests/dev_crosscheck.py"
+
+# P2a：同一套宿主机工具下的 MP4/fMP4/MOV 箱体对照（不链产品库）
+log ""
+log "== BMFF box crosscheck"
+BMFF_INSPECT_BIN=""
+for c in "$ROOT/build/debug/ms_bmff_inspect" "$ROOT/build/release/ms_bmff_inspect" "$ROOT/build/default/ms_bmff_inspect"; do
+  if [[ -x "$c" ]]; then BMFF_INSPECT_BIN="$c"; break; fi
+done
+bash "$ROOT/tests/dev_bmff_crosscheck.sh" --outdir "$OUTDIR/bmff-crosscheck" --inspect "$BMFF_INSPECT_BIN"
+
+# P2b/P2c/P2d：渐进 MP4/MOV 与 fMP4 H264/AAC AU 对照（独立 sample/moof 表 + ms_ts_inspect；不链产品库）
+log ""
+log "== BMFF progressive AU crosscheck"
+bash "$ROOT/tests/dev_bmff_au_crosscheck.sh" --outdir "$OUTDIR/bmff-au-crosscheck" --inspect "$INSPECT"
+
+# P2e：经典 FLV H264/AAC AU 对照（独立 tag 表 + ms_ts_inspect + ffprobe；不链产品库）
+log ""
+log "== FLV AU crosscheck"
+bash "$ROOT/tests/dev_flv_au_crosscheck.sh" --outdir "$OUTDIR/flv-au-crosscheck" --inspect "$INSPECT"

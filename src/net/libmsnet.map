@@ -1,0 +1,19 @@
+MSMEDIA_NET_1.0 {
+  global:
+    ms_net_limits_default;
+    ms_net_create;
+    ms_net_destroy;
+    ms_net_set_ca_file;
+    ms_net_set_log;
+    ms_net_worker_start;
+    ms_net_worker_stop;
+    ms_net_drive;
+    ms_net_get_start;
+    ms_net_read;
+    ms_net_cancel;
+    ms_net_last_err;
+    ms_net_last_http_status;
+    ms_net_hls_fetch_bind;
+  local:
+    *;
+};

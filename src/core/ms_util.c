@@ -4,6 +4,48 @@
 
 #include "ms_internal.h"
 
+#include <limits.h>
+
+void ms_copy_meter_add(ms_copy_meter *m, int kind, size_t n)
+{
+    if (m == NULL || n == 0) {
+        return;
+    }
+    if (kind == MS_COPY_IN) {
+        m->copy_in_ops++;
+        m->copy_in_bytes += (uint64_t)n;
+    } else if (kind == MS_COPY_ASM) {
+        m->copy_asm_ops++;
+        m->copy_asm_bytes += (uint64_t)n;
+    } else if (kind == MS_COPY_OUT) {
+        m->copy_out_ops++;
+        m->copy_out_bytes += (uint64_t)n;
+    } else if (kind == MS_COPY_MOVE) {
+        m->move_out_ops++;
+        m->move_out_bytes += (uint64_t)n;
+    }
+}
+
+int ms_owned_contains(const uint8_t *base, size_t cap,
+                      const uint8_t *data, size_t size)
+{
+    size_t off;
+    if (base == NULL || data == NULL || cap == 0 || size == 0) {
+        return 0;
+    }
+    if (data < base) {
+        return 0;
+    }
+    off = (size_t)(data - base);
+    if (off > cap) {
+        return 0;
+    }
+    if (size > cap - off) {
+        return 0;
+    }
+    return 1;
+}
+
 int ms_size_add(size_t a, size_t b, size_t *out)
 {
     if (out == NULL) {
@@ -27,6 +69,83 @@ int ms_size_mul(size_t a, size_t b, size_t *out)
     *out = a * b;
     return 0;
 }
+
+
+#if defined(__SIZEOF_INT128__)
+int ms_u64_scale(uint64_t v, uint64_t num, uint64_t den, uint64_t *out)
+{
+    unsigned __int128 x;
+    unsigned __int128 q;
+    if (out == NULL || den == 0) {
+        return -1;
+    }
+    x = (unsigned __int128)v * (unsigned __int128)num;
+    q = x / (unsigned __int128)den;
+    if (q > (unsigned __int128)UINT64_MAX) {
+        return -1;
+    }
+    *out = (uint64_t)q;
+    return 0;
+}
+#else
+typedef struct {
+    uint64_t lo;
+    uint64_t hi;
+} ms_u128;
+
+static ms_u128 ms_u128_mul(uint64_t a, uint64_t b)
+{
+    const uint64_t m = 0xffffffffull;
+    uint64_t a0 = a & m, a1 = a >> 32, b0 = b & m, b1 = b >> 32;
+    uint64_t p0 = a0 * b0, p1 = a0 * b1, p2 = a1 * b0, p3 = a1 * b1;
+    uint64_t mid = (p0 >> 32) + (p1 & m) + (p2 & m);
+    ms_u128 r;
+    r.lo = (p0 & m) | (mid << 32);
+    r.hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+    return r;
+}
+
+/* 128/64 → 64，商超出则返回 -1。 */
+static int ms_u128_divu64(ms_u128 n, uint64_t den, uint64_t *out)
+{
+    uint64_t q, r, i;
+    if (out == NULL || den == 0) {
+        return -1;
+    }
+    if (n.hi >= den) {
+        return -1;
+    }
+    q = 0;
+    r = n.hi;
+    for (i = 0; i < 64; i++) {
+        uint64_t bit = (n.lo >> (63u - (unsigned)i)) & 1ull;
+        uint64_t nr = (r << 1) | bit;
+        /* 若 r 的最高位在移位时溢出，则 nr 必然 >= den */
+        if (r & (1ull << 63)) {
+            /* (2^64 + (r<<1|bit) - den)，但 r<<1 已丢失高位 */
+            q = (q << 1) | 1ull;
+            r = (r << 1) | bit;
+            r -= den;
+        } else if (nr >= den) {
+            q = (q << 1) | 1ull;
+            r = nr - den;
+        } else {
+            q = (q << 1);
+            r = nr;
+        }
+    }
+    *out = q;
+    return 0;
+}
+
+int ms_u64_scale(uint64_t v, uint64_t num, uint64_t den, uint64_t *out)
+{
+    if (out == NULL || den == 0) {
+        return -1;
+    }
+    return ms_u128_divu64(ms_u128_mul(v, num), den, out);
+}
+#endif
 
 void ms_default_allocator(ms_allocator *out)
 {
@@ -357,6 +476,8 @@ const char *ms_status_name(ms_status st)
         return "INVALID_ARG";
     case MS_ERR_NOT_SEEKABLE:
         return "NOT_SEEKABLE";
+    case MS_ERR_TIMEOUT:
+        return "TIMEOUT";
     default:
         return "INVALID_STATUS";
     }
@@ -401,6 +522,26 @@ const char *ms_codec_name(ms_codec codec)
         return "g711-alaw";
     case MS_CODEC_G711_ULAW:
         return "g711-ulaw";
+    case MS_CODEC_SUB_TEXT:
+        return "sub-text";
+    case MS_CODEC_SUB_SRT:
+        return "sub-srt";
+    case MS_CODEC_SUB_WEBVTT:
+        return "sub-webvtt";
+    case MS_CODEC_SUB_TX3G:
+        return "sub-tx3g";
+    case MS_CODEC_SUB_BITMAP:
+        return "sub-bitmap";
+    case MS_CODEC_SUB_ASS:
+        return "sub-ass";
+    case MS_CODEC_FLAC:
+        return "flac";
+    case MS_CODEC_PCM:
+        return "pcm";
+    case MS_CODEC_DTS:
+        return "dts";
+    case MS_CODEC_AAC_LATM:
+        return "aac-latm";
     default:
         return "invalid-codec";
     }
@@ -436,6 +577,7 @@ void ms_session_limits_default(ms_session_limits *out)
     out->struct_size = sizeof(*out);
     out->max_assembly_bytes = MS_DEFAULT_MAX_ASSEMBLY_BYTES;
     out->session_budget_bytes = MS_DEFAULT_SESSION_BUDGET_BYTES;
+    out->max_lookback_bytes = MS_DEFAULT_MAX_LOOKBACK_BYTES;
 }
 
 void ms_session_limits_absolute(ms_session_limits *out)
@@ -452,4 +594,264 @@ void ms_session_limits_absolute(ms_session_limits *out)
     out->struct_size = sizeof(*out);
     out->max_assembly_bytes = MS_ABS_MAX_ASSEMBLY_BYTES;
     out->session_budget_bytes = MS_ABS_SESSION_BUDGET_BYTES;
+    out->max_lookback_bytes = MS_ABS_MAX_LOOKBACK_BYTES;
+}
+
+const char *ms_format_name(ms_format format)
+{
+    switch (format) {
+    case MS_FORMAT_UNKNOWN:
+        return "unknown";
+    case MS_FORMAT_MPEG_TS:
+        return "mpeg_ts";
+    case MS_FORMAT_MP4:
+        return "mp4";
+    case MS_FORMAT_FMP4:
+        return "fmp4";
+    case MS_FORMAT_MOV:
+        return "mov";
+    case MS_FORMAT_FLV:
+        return "flv";
+    case MS_FORMAT_HLS:
+        return "hls";
+    case MS_FORMAT_DASH:
+        return "dash";
+    case MS_FORMAT_RTSP:
+        return "rtsp";
+    case MS_FORMAT_RTMP:
+        return "rtmp";
+    case MS_FORMAT_RTP:
+        return "rtp";
+    case MS_FORMAT_MATROSKA:
+        return "matroska";
+    case MS_FORMAT_WEBM:
+        return "webm";
+    case MS_FORMAT_AVI:
+        return "avi";
+    case MS_FORMAT_MPEGPS:
+        return "mpegps";
+    case MS_FORMAT_MP3:
+        return "mp3";
+    case MS_FORMAT_FLAC:
+        return "flac";
+    case MS_FORMAT_WAV:
+        return "wav";
+    case MS_FORMAT_ASF:
+        return "asf";
+    case MS_FORMAT_RM:
+        return "rm";
+    default:
+        return "invalid_format";
+    }
+}
+
+const char *ms_sample_format_name(ms_sample_format fmt)
+{
+    switch (fmt) {
+    case MS_SAMPLE_FMT_UNKNOWN:
+        return "unknown";
+    case MS_SAMPLE_FMT_ANNEXB:
+        return "annexb";
+    case MS_SAMPLE_FMT_AVCC:
+        return "avcc";
+    case MS_SAMPLE_FMT_ADTS:
+        return "adts";
+    case MS_SAMPLE_FMT_AAC_RAW:
+        return "aac_raw";
+    case MS_SAMPLE_FMT_HVCC:
+        return "hvcc";
+    case MS_SAMPLE_FMT_MPV:
+        return "mpv";
+    case MS_SAMPLE_FMT_MP4V:
+        return "mp4v";
+    case MS_SAMPLE_FMT_H263:
+        return "h263";
+    case MS_SAMPLE_FMT_AV1:
+        return "av1";
+    case MS_SAMPLE_FMT_AC3:
+        return "ac3";
+    case MS_SAMPLE_FMT_MPEG_AUDIO:
+        return "mpeg_audio";
+    case MS_SAMPLE_FMT_OPUS:
+        return "opus";
+    case MS_SAMPLE_FMT_CAVS:
+        return "cavs";
+    case MS_SAMPLE_FMT_FLAC:
+        return "flac";
+    case MS_SAMPLE_FMT_PCM:
+        return "pcm";
+    default:
+        return "invalid_sample_fmt";
+    }
+}
+
+ms_status ms_rescale_q(int64_t in, int in_num, int in_den, int out_num, int out_den,
+                       int64_t *out)
+{
+#if defined(__SIZEOF_INT128__)
+    __int128 num, den, n, q, r;
+    if (out == NULL) {
+        return MS_ERR_INVALID_ARG;
+    }
+    *out = 0;
+    if (in_num <= 0 || in_den <= 0 || out_num <= 0 || out_den <= 0) {
+        return MS_ERR_INVALID_ARG;
+    }
+    num = (__int128)in_num * (unsigned)out_den;
+    den = (__int128)in_den * (unsigned)out_num;
+    if (den <= 0) {
+        return MS_ERR_INVALID_ARG;
+    }
+    n = (__int128)in * num;
+    q = n / den;
+    r = n % den;
+    if (n < 0 && r != 0) {
+        q -= 1;
+    }
+    if (q > (__int128)INT64_MAX || q < (__int128)INT64_MIN) {
+        return MS_ERR_OVERFLOW;
+    }
+    *out = (int64_t)q;
+    return MS_OK;
+#else
+    uint64_t unum, uden, uq, rem_unused;
+    int neg, adj;
+    ms_u128 nabs;
+    if (out == NULL) {
+        return MS_ERR_INVALID_ARG;
+    }
+    *out = 0;
+    (void)rem_unused;
+    if (in_num <= 0 || in_den <= 0 || out_num <= 0 || out_den <= 0) {
+        return MS_ERR_INVALID_ARG;
+    }
+    unum = (uint64_t)in_num * (uint64_t)(unsigned)out_den;
+    uden = (uint64_t)in_den * (uint64_t)(unsigned)out_num;
+    if (uden == 0) {
+        return MS_ERR_INVALID_ARG;
+    }
+    neg = (in < 0);
+    nabs = ms_u128_mul(neg ? (uint64_t)(-(in + 1)) + 1ull : (uint64_t)in, unum);
+    if (ms_u128_divu64(nabs, uden, &uq) != 0 || uq > (uint64_t)INT64_MAX) {
+        return MS_ERR_OVERFLOW;
+    }
+    /* 朝 -inf：负数且不能整除时减 1。用 uq*uden 与 |n| 比较。 */
+    adj = 0;
+    if (neg) {
+        ms_u128 back = ms_u128_mul(uq, uden);
+        if (back.lo != nabs.lo || back.hi != nabs.hi) {
+            adj = 1;
+        }
+    }
+    if (neg) {
+        if (uq == 0 && adj) {
+            *out = -1;
+        } else if (uq > (uint64_t)INT64_MAX) {
+            return MS_ERR_OVERFLOW;
+        } else {
+            *out = -(int64_t)uq - adj;
+        }
+    } else {
+        *out = (int64_t)uq;
+    }
+    return MS_OK;
+#endif
+}
+
+static ms_status signed_one(int has, uint64_t rel, int64_t origin_tb, int *has_out,
+                            int64_t *val_out)
+{
+    int64_t sum;
+    if (has_out != NULL) {
+        *has_out = has ? 1 : 0;
+    }
+    if (!has) {
+        return MS_OK;
+    }
+    if (rel > (uint64_t)INT64_MAX) {
+        return MS_ERR_OVERFLOW;
+    }
+    sum = origin_tb + (int64_t)rel;
+    if ((origin_tb > 0 && (int64_t)rel > 0 && sum < origin_tb) ||
+        (origin_tb < 0 && (int64_t)rel < 0 && sum > origin_tb)) {
+        return MS_ERR_OVERFLOW;
+    }
+    if (val_out != NULL) {
+        *val_out = sum;
+    }
+    return MS_OK;
+}
+
+static ms_status origin_in_event_tb(const ms_event *ev, int64_t origin_90k, int64_t *origin_tb)
+{
+    if (origin_90k == 0) {
+        *origin_tb = 0;
+        return MS_OK;
+    }
+    if (ev->time_base_num <= 0 || ev->time_base_den <= 0) {
+        return MS_ERR_INVALID_ARG;
+    }
+    return ms_rescale_q(origin_90k, 1, 90000, ev->time_base_num, ev->time_base_den, origin_tb);
+}
+
+ms_status ms_event_signed_ts(const ms_event *ev, int64_t origin_90k, int *has_pts, int64_t *pts,
+                             int *has_dts, int64_t *dts)
+{
+    int64_t origin_tb = 0;
+    ms_status st;
+    if (ev == NULL) {
+        return MS_ERR_INVALID_ARG;
+    }
+    st = origin_in_event_tb(ev, origin_90k, &origin_tb);
+    if (st != MS_OK) {
+        return st;
+    }
+    st = signed_one(ev->has_pts, ev->pts, origin_tb, has_pts, pts);
+    if (st != MS_OK) {
+        return st;
+    }
+    return signed_one(ev->has_dts, ev->dts, origin_tb, has_dts, dts);
+}
+
+ms_status ms_event_media_time_90k(const ms_event *ev, int64_t origin_90k, int *has_pts,
+                                  int64_t *pts_90k, int *has_dts, int64_t *dts_90k)
+{
+    int hp = 0, hd = 0;
+    int64_t pts = 0, dts = 0, p90 = 0, d90 = 0;
+    ms_status st;
+    st = ms_event_signed_ts(ev, origin_90k, &hp, &pts, &hd, &dts);
+    if (st != MS_OK) {
+        return st;
+    }
+    if (has_pts != NULL) {
+        *has_pts = hp;
+    }
+    if (has_dts != NULL) {
+        *has_dts = hd;
+    }
+    if (hp) {
+        if (ev->time_base_num <= 0 || ev->time_base_den <= 0) {
+            return MS_ERR_INVALID_ARG;
+        }
+        st = ms_rescale_q(pts, ev->time_base_num, ev->time_base_den, 1, 90000, &p90);
+        if (st != MS_OK) {
+            return st;
+        }
+        if (pts_90k != NULL) {
+            *pts_90k = p90;
+        }
+    }
+    if (hd) {
+        if (ev->time_base_num <= 0 || ev->time_base_den <= 0) {
+            return MS_ERR_INVALID_ARG;
+        }
+        st = ms_rescale_q(dts, ev->time_base_num, ev->time_base_den, 1, 90000, &d90);
+        if (st != MS_OK) {
+            return st;
+        }
+        if (dts_90k != NULL) {
+            *dts_90k = d90;
+        }
+    }
+    return MS_OK;
 }

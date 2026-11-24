@@ -1,0 +1,7 @@
+# Official HarfBuzz 10.2.0 pin. Do not auto-upgrade.
+# License: "Old MIT" (COPYING). Test/sample fonts in the tarball are not
+# compiled into the library and are not packaged by this project.
+version=10.2.0
+tarball_url=https://github.com/harfbuzz/harfbuzz/releases/download/10.2.0/harfbuzz-10.2.0.tar.xz
+tarball_sha256=620e3468faec2ea8685d32c46a58469b850ef63040b3565cde05959825b48227
+license=MIT-Old

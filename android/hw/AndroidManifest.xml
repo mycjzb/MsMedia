@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.msmedia"
+    android:versionCode="3"
+    android:versionName="1.2">
+    <uses-sdk android:minSdkVersion="18" android:targetSdkVersion="34" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <application
+        android:label="@string/app_name"
+        android:debuggable="true"
+        android:usesCleartextTraffic="true">
+        <activity android:name=".MsHwPlayerActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:scheme="udp" />
+                <data android:scheme="rtp" />
+                <data android:scheme="rtsp" />
+                <data android:scheme="rtsps" />
+                <data android:scheme="rtmp" />
+                <data android:scheme="rtmps" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".MsHwSmokeActivity"
+            android:exported="true"
+            android:label="@string/smoke_name" />
+    </application>
+</manifest>
