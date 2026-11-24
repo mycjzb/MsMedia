@@ -18,7 +18,7 @@ Android 播放器内核：一个 `libmsplayer.so` + 几个 Java 类，接口与 
 | 视频 | H.264、H.265、MPEG-2、AVS+ 等，交给 MediaCodec 硬解（能解什么取决于设备）|
 | 音频软解 | AAC、AAC-LATM、AC-3、E-AC-3、MP2、DTS、G.711 A-law、G.711 μ-law；其余格式交给系统解码器 |
 | 音频透传 | AC-3 / E-AC-3 / DTS 直通功放，设备不支持时自动回落软解 |
-| 字幕 | 内核可解 SRT、WebVTT、ASS/SSA、mov_text、PGS、DVB（Java `MediaPlayer` 还没开放字幕/选轨接口，见已知限制） |
+| 字幕 | 内核可解 SRT、WebVTT、ASS/SSA、mov_text、PGS、DVB；文字字幕通过 `OnTimedTextListener` 回调，支持外挂 SRT/VTT/ASS |
 | 其他 | 不看扩展名，按内容探测；切片/文件前面套了 PNG/JPEG 头的会自动剥掉 |
 
 ## 接入
@@ -27,16 +27,17 @@ Android 播放器内核：一个 `libmsplayer.so` + 几个 Java 类，接口与 
 2. 把下面几个 Java 文件拷进工程，包名不要改（JNI 按包名查找）：
 
 ```
-android/hw/java/com/msmedia/MediaPlayer.java
-android/hw/java/com/msmedia/MsNativeLoader.java
-android/hw/java/com/msmedia/MsSystemTls.java
-android/hw/java/com/msmedia/net/MsHttpClient.java
+android/hw/java/com/mycjzb/media/player/MediaPlayer.java
+android/hw/java/com/mycjzb/media/player/TimedText.java
+android/hw/java/com/mycjzb/media/player/MsNativeLoader.java
+android/hw/java/com/mycjzb/media/player/MsSystemTls.java
+android/hw/java/com/mycjzb/media/player/MsHttpClient.java
 ```
 
-3. 混淆规则：
+3. 混淆规则：把 `android/hw/consumer-rules.pro` 加到 `proguardFiles`，或者直接：
 
 ```
--keep class com.msmedia.** { *; }
+-keep class com.mycjzb.media.player.** { *; }
 -keepclasseswithmembernames class * { native <methods>; }
 ```
 
@@ -46,10 +47,10 @@ android/hw/java/com/msmedia/net/MsHttpClient.java
 
 ### 播放
 
-和系统 MediaPlayer 一样，只是 import 换成 `com.msmedia.MediaPlayer`：
+和系统 MediaPlayer 一样，只是 import 换成 `com.mycjzb.media.player.MediaPlayer`：
 
 ```java
-import com.msmedia.MediaPlayer;
+import com.mycjzb.media.player.MediaPlayer;
 
 MediaPlayer mp = new MediaPlayer();
 mp.setDataSource("https://example.com/live/index.m3u8");
@@ -63,6 +64,48 @@ mp.release();
 ```
 
 `seekTo`、`pause`、`getCurrentPosition`、`getDuration`、`setLooping`、各种 Listener 用法都不变。
+
+### 多音轨和字幕
+
+和系统接口一样。`TimedText` 用本库的 `com.mycjzb.media.player.TimedText`（系统那个类没法由第三方创建）。
+
+```java
+import com.mycjzb.media.player.MediaPlayer;
+import com.mycjzb.media.player.MediaPlayer.TrackInfo;
+import com.mycjzb.media.player.TimedText;
+
+mp.setDataSource(url);
+// 外挂字幕可以在 prepare 前加，prepare 完成后生效
+mp.addTimedTextSource("/sdcard/movie.srt", MediaPlayer.MEDIA_MIMETYPE_TEXT_SUBRIP);
+mp.setOnTimedTextListener((p, text) -> {
+    // 主线程回调；text 为 null 表示当前没有字幕，清掉显示
+    subtitleView.setText(text == null ? "" : text.getText());
+});
+mp.setOnPreparedListener(p -> {
+    TrackInfo[] tracks = p.getTrackInfo();
+    for (int i = 0; i < tracks.length; i++) {
+        if (tracks[i].getTrackType() == TrackInfo.MEDIA_TRACK_TYPE_AUDIO
+                && "chi".equals(tracks[i].getLanguage())) {
+            p.selectTrack(i);              // 切到中文音轨
+        }
+        if (tracks[i].getTrackType() == TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT) {
+            p.selectTrack(i);              // 打开字幕（默认不开）
+        }
+    }
+    p.start();
+});
+mp.prepareAsync();
+
+int audio = mp.getSelectedTrack(TrackInfo.MEDIA_TRACK_TYPE_AUDIO);
+mp.deselectTrack(mp.getSelectedTrack(TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT)); // 关字幕
+```
+
+说明：
+
+- 下标就是 `getTrackInfo()` 数组的下标。文字字幕（SRT/WebVTT/tx3g/ASS）报 `TIMEDTEXT`，位图字幕（PGS/DVB/VobSub）报 `SUBTITLE`。
+- 视频轨不能选，音轨不能取消，都会抛 `IllegalArgumentException`；prepare 之前调用抛 `IllegalStateException`，和系统一致。
+- 外挂字幕支持 `MEDIA_MIMETYPE_TEXT_SUBRIP`，另外可以用 `MEDIA_MIMETYPE_TEXT_VTT`、`MEDIA_MIMETYPE_TEXT_SSA`。
+- `TimedText` 额外有 `getStartTimeMs()`、`getEndTimeMs()`、`getAlignment()`。
 
 ### HLS 缓冲（参照 Media3 的 DefaultLoadControl）
 
@@ -192,7 +235,9 @@ docs/              设计、审计、进度记录
 - 硬解出画、HDMI 透传、AVS+ 只在模拟器和部分盒子上验证过，上线前请在目标设备上跑一遍 `docs/DESIGN_AUDIT.md` 里的真机清单。
 - TLS 只保留 TLS 1.2/1.3 和 ECDHE（P-256/P-384）+ AES-GCM/CBC，不支持 ChaCha20、X25519、DHE 和 TLS 1.0/1.1。
 - HLS 的 SAMPLE-AES 和 DRM 不支持；`maxBufferBytes` 可能被正在下载的那一片多占一点。
-- `com.msmedia.MediaPlayer` 目前没有 `getTrackInfo` / `selectTrack` / `OnTimedTextListener`，多音轨切换和字幕回调还不能通过它用（内核和演示 App 里已有，接口还没接到 MediaPlayer 上）。
+- 包名从 `com.msmedia` 改成了 `com.mycjzb.media.player`（`MsHttpClient` 也从 `com.msmedia.net` 移到这里），老代码改一下 import。
+- 字幕：同一时间只能挂一个外挂字幕文件，再加会替换上一个；位图字幕可以选，但不通过 `OnTimedTextListener` 回调图片；没有 `OnSubtitleDataListener`；`TrackInfo` 没实现 `Parcelable`。
+- 切音轨要等新音轨的数据读到才真正换过去（不会断音），`getSelectedTrack` 会立刻返回新选的轨。
 - 不支持 iOS / Windows。
 
 ## License

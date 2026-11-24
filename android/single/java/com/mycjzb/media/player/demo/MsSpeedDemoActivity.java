@@ -5,10 +5,11 @@
  *   create→setDataSource、→OnPrepared、→首帧（OnInfo RENDERING_START），单位毫秒。
  * 自动化（adb am start 传 extra，见 scripts/android_single_apk.sh 说明）：
  *   auto=bench 逐地址×播放器测速并走完整生命周期；http=... 跑一次 MsHttpClient 请求。
+ *   auto=tracks 选轨/字幕接口自测（urls 取第一个，sub=外挂 SRT 路径，repeat=轮数），见 MsTrackSelfTest。
  * 日志/浮层不打印完整 URL（只显示 scheme://host/…/文件名），避免泄露私有地址。
  * by: Long <mycjzb@gmail.com>
  */
-package com.msmedia.demo;
+package com.mycjzb.media.player.demo;
 
 import android.app.Activity;
 import android.content.Intent;
@@ -123,38 +124,38 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
     }
 
     static final class MsPlayer implements Player {
-        final com.msmedia.MediaPlayer mp = new com.msmedia.MediaPlayer();
+        final com.mycjzb.media.player.MediaPlayer mp = new com.mycjzb.media.player.MediaPlayer();
 
         MsPlayer(final Listener l) {
             /* 阶段 4 新 API：预加载（10 s / 16 MiB）与音频直通开关（intent --ei pt 1）。 */
             mp.setPreloadConfig(10000, 16L << 20);
             mp.setAudioPassthroughEnabled(sPassthrough);
-            mp.setOnPreparedListener(new com.msmedia.MediaPlayer.OnPreparedListener() {
-                public void onPrepared(com.msmedia.MediaPlayer m) {
+            mp.setOnPreparedListener(new com.mycjzb.media.player.MediaPlayer.OnPreparedListener() {
+                public void onPrepared(com.mycjzb.media.player.MediaPlayer m) {
                     l.onPrepared();
                     Log.i(TAG, "MSPT enabled=" + m.isAudioPassthroughEnabled() + " route=" + m.getAudioPassthroughRoute());
                 }
             });
-            mp.setOnInfoListener(new com.msmedia.MediaPlayer.OnInfoListener() {
-                public boolean onInfo(com.msmedia.MediaPlayer m, int what, int extra) {
-                    if (what == com.msmedia.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) l.onFirstFrame();
+            mp.setOnInfoListener(new com.mycjzb.media.player.MediaPlayer.OnInfoListener() {
+                public boolean onInfo(com.mycjzb.media.player.MediaPlayer m, int what, int extra) {
+                    if (what == com.mycjzb.media.player.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) l.onFirstFrame();
                     return false;
                 }
             });
-            mp.setOnErrorListener(new com.msmedia.MediaPlayer.OnErrorListener() {
-                public boolean onError(com.msmedia.MediaPlayer m, int what, int extra) {
+            mp.setOnErrorListener(new com.mycjzb.media.player.MediaPlayer.OnErrorListener() {
+                public boolean onError(com.mycjzb.media.player.MediaPlayer m, int what, int extra) {
                     l.onError(what, extra);
                     return true;
                 }
             });
-            mp.setOnCompletionListener(new com.msmedia.MediaPlayer.OnCompletionListener() {
-                public void onCompletion(com.msmedia.MediaPlayer m) { l.onCompletion(); }
+            mp.setOnCompletionListener(new com.mycjzb.media.player.MediaPlayer.OnCompletionListener() {
+                public void onCompletion(com.mycjzb.media.player.MediaPlayer m) { l.onCompletion(); }
             });
-            mp.setOnSeekCompleteListener(new com.msmedia.MediaPlayer.OnSeekCompleteListener() {
-                public void onSeekComplete(com.msmedia.MediaPlayer m) { l.onSeekComplete(); }
+            mp.setOnSeekCompleteListener(new com.mycjzb.media.player.MediaPlayer.OnSeekCompleteListener() {
+                public void onSeekComplete(com.mycjzb.media.player.MediaPlayer m) { l.onSeekComplete(); }
             });
         }
-        public String kind() { return com.msmedia.MediaPlayer.isFfmpegRoute() ? "MsMedia(B)" : "MsMedia(A)"; }
+        public String kind() { return com.mycjzb.media.player.MediaPlayer.isFfmpegRoute() ? "MsMedia(B)" : "MsMedia(A)"; }
         public void setDisplay(SurfaceHolder h) { mp.setDisplay(h); }
         public void setDataSource(String loc) throws Exception { mp.setDataSource(loc); }
         public void prepareAsync() { mp.prepareAsync(); }
@@ -191,6 +192,8 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
     private int autoStep;
     private final List<int[]> autoPlan = new ArrayList<int[]>(); /* {urlIndex, isMs} */
     private int lifecyclePhase;
+    private boolean trackTest;  /* auto=tracks */
+    private String trackSub;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -237,6 +240,8 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
         if (p != null) useMs = !"sys".equals(p);
         String a = it.getStringExtra("auto");
         auto = "bench".equals(a);
+        trackTest = "tracks".equals(a);
+        trackSub = it.getStringExtra("sub");
         String ps = it.getStringExtra("players");
         if (ps != null && ps.length() > 0) autoPlayers = ps.split(",");
         autoRepeat = Math.max(1, it.getIntExtra("repeat", 1));
@@ -244,7 +249,7 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
         sPassthrough = it.getIntExtra("pt", 0) != 0;
         try {
             /* 探测在所有 API 上都必须安全：API 18 返回 0，不得 NoSuchMethodError/VerifyError。 */
-            int caps = com.msmedia.MediaPlayer.getAudioPassthroughCaps(this);
+            int caps = com.mycjzb.media.player.MediaPlayer.getAudioPassthroughCaps(this);
             Log.i(TAG, "MSAPI sdk=" + android.os.Build.VERSION.SDK_INT + " pt_caps=0x" + Integer.toHexString(caps)
                     + " pt=" + sPassthrough);
         } catch (Throwable t) {
@@ -483,7 +488,7 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
 
     private void refreshOverlay() {
         StringBuilder sb = new StringBuilder();
-        sb.append("播放器: ").append(useMs ? (com.msmedia.MediaPlayer.isFfmpegRoute() ? "MsMedia(路线B)" : "MsMedia(路线A)") : "System")
+        sb.append("播放器: ").append(useMs ? (com.mycjzb.media.player.MediaPlayer.isFfmpegRoute() ? "MsMedia(路线B)" : "MsMedia(路线A)") : "System")
           .append("    频道: ").append(index + 1).append('/').append(urls.length).append('\n');
         sb.append(redact(urls.length > 0 ? urls[index] : "-")).append('\n');
         sb.append("create→setDataSource: ").append(tSetDs > 0 ? (tSetDs - tCreate) + " ms" : "-").append('\n');
@@ -496,15 +501,15 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
 
     /* ---------------- 公共网络类实测 ---------------- */
     private void runHttpTests(String[] list) {
-        com.msmedia.MsNativeLoader.ensure();
-        com.msmedia.net.MsHttpClient c = new com.msmedia.net.MsHttpClient.Builder()
+        com.mycjzb.media.player.MsNativeLoader.ensure();
+        com.mycjzb.media.player.MsHttpClient c = new com.mycjzb.media.player.MsHttpClient.Builder()
                 .connectTimeout(10000).readTimeout(15000).build();
         for (String u : list) {
             long t0 = SystemClock.elapsedRealtime();
             String res;
             try {
-                com.msmedia.net.MsHttpClient.Response r = c.newCall(
-                        new com.msmedia.net.MsHttpClient.RequestBuilder().url(u).get().build()).execute();
+                com.mycjzb.media.player.MsHttpClient.Response r = c.newCall(
+                        new com.mycjzb.media.player.MsHttpClient.RequestBuilder().url(u).get().build()).execute();
                 long n = 0;
                 InputStream in = r.body();
                 byte[] buf = new byte[16384];
@@ -524,6 +529,11 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
     @Override
     public void surfaceCreated(SurfaceHolder h) {
         holder = h;
+        if (trackTest) {
+            trackTest = false; /* 只跑一次 */
+            new MsTrackSelfTest(h, resolve(urls[0]), trackSub == null ? null : resolve(trackSub), autoRepeat).start();
+            return;
+        }
         if (auto) {
             autoNext();
         } else {

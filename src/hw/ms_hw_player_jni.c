@@ -1703,7 +1703,7 @@ static int queue_session(player_jni *pj, int kind, const char *loc,
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeCreate(JNIEnv *env, jobject thiz)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeCreate(JNIEnv *env, jobject thiz)
 {
     player_jni *pj;
     ms_hw_player_opts o;
@@ -1739,7 +1739,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeCreate(JNIEnv *env, jobject thiz)
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeSetForceDecoder(JNIEnv *env, jobject thiz,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSetForceDecoder(JNIEnv *env, jobject thiz,
                                                           jlong h, jstring jname)
 {
     player_jni *pj = pj_from(h);
@@ -1766,7 +1766,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeSetForceDecoder(JNIEnv *env, jobject t
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeSetSurface(JNIEnv *env, jobject thiz,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSetSurface(JNIEnv *env, jobject thiz,
                                                      jlong h, jobject surface)
 {
     player_jni *pj = pj_from(h);
@@ -1805,7 +1805,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeSetSurface(JNIEnv *env, jobject thiz,
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeInjectDemo(JNIEnv *env, jobject thiz,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeInjectDemo(JNIEnv *env, jobject thiz,
                                                      jlong h)
 {
     player_jni *pj = pj_from(h);
@@ -1831,7 +1831,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeInjectDemo(JNIEnv *env, jobject thiz,
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativePlayPath(JNIEnv *env, jobject thiz,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativePlayPath(JNIEnv *env, jobject thiz,
                                                    jlong h, jstring jpath)
 {
     player_jni *pj = pj_from(h);
@@ -1874,7 +1874,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativePlayPath(JNIEnv *env, jobject thiz,
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeOpenUrl(JNIEnv *env, jobject thiz,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeOpenUrl(JNIEnv *env, jobject thiz,
                                                   jlong h, jstring jurl,
                                                   jstring jca, jint timeout_ms)
 {
@@ -1927,7 +1927,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeOpenUrl(JNIEnv *env, jobject thiz,
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeHasFf(JNIEnv *env, jobject thiz)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeHasFf(JNIEnv *env, jobject thiz)
 {
     (void)env;
     (void)thiz;
@@ -1939,7 +1939,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeHasFf(JNIEnv *env, jobject thiz)
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeDrive(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeDrive(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     char buf[3072];
@@ -1957,7 +1957,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeDrive(JNIEnv *env, jobject thiz, jlong
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeStats(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeStats(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     char buf[4096];
@@ -1980,7 +1980,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeStats(JNIEnv *env, jobject thiz, jlong
 }
 
 JNIEXPORT void JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeFlush(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeFlush(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     (void)env;
@@ -1993,7 +1993,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeFlush(JNIEnv *env, jobject thiz, jlong
 }
 
 JNIEXPORT void JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeCancel(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeCancel(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     (void)env;
@@ -2009,7 +2009,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeCancel(JNIEnv *env, jobject thiz, jlon
 }
 
 JNIEXPORT void JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeDestroy(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeDestroy(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     (void)env;
@@ -2077,7 +2077,7 @@ static void format_tracks(char *dst, size_t cap, const ms_hw_player *p)
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeListTracks(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeListTracks(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     char buf[1536];
@@ -2091,72 +2091,102 @@ Java_com_msmedia_MsHwPlayerActivity_nativeListTracks(JNIEnv *env, jobject thiz, 
     return (*env)->NewStringUTF(env, buf);
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeSelectTrack(JNIEnv *env, jobject thiz, jlong h,
-                                                      jint id, jint on)
+/* 选轨公共实现（演示 Activity 与 com.mycjzb.media.player.MediaPlayer 共用，by: Long <mycjzb@gmail.com>）。
+ * 播放器侧立即生效（stats / 清 ASS），demux 选择仍可异步入队。
+ * 不得只入队等到 feed 成功才提交，否则背压下命令永不完成。
+ * 调用线程最多等 wait_ms 拿锁，避免 configure 期间 ANR；拿不到锁时整条命令交给 worker。
+ * 返回播放器侧状态；*queued=1 表示已交给 worker 异步执行。msg 可为 NULL。 */
+static ms_status pj_select_track(player_jni *pj, uint32_t id, int on, int wait_ms,
+                                 int *queued, char *msg, size_t cap)
 {
-    player_jni *pj = pj_from(h);
     ms_status st;
-    char buf[256];
-    (void)thiz;
-    if (pj == NULL || pj->p == NULL) {
-        return (*env)->NewStringUTF(env, "no player");
+    char dummy[8];
+    if (msg == NULL || cap == 0) {
+        msg = dummy;
+        cap = sizeof(dummy);
     }
-    /* 播放器侧立即生效（stats / 清 ASS），demux 选择仍可异步入队。
-     * 不得只入队等到 feed 成功才提交，否则背压下命令永不完成。
-     * UI 最多等 80ms，避免 configure 期间 ANR。 */
-    if (!lock_op_ms(pj, 80)) {
+    if (queued != NULL) {
+        *queued = 0;
+    }
+    if (pj == NULL || pj->p == NULL) {
+        snprintf(msg, cap, "no player");
+        return MS_ERR_STATE;
+    }
+    if ((id == MS_TRACK_ID_EXTERNAL_SUB || id == MS_TRACK_ID_AI_SUB) && !lock_op_ms(pj, wait_ms)) {
+        /* 外挂/AI 字幕哨兵只改播放器侧开关，worker 队列不接（enqueue_select 会丢弃），
+         * 拿不到锁时阻塞等锁，否则命令会静默丢失。 */
+        pthread_mutex_lock(&pj->op);
+    } else if (id != MS_TRACK_ID_EXTERNAL_SUB && id != MS_TRACK_ID_AI_SUB && !lock_op_ms(pj, wait_ms)) {
 #ifdef MS_HW_HAVE_FF
         if (pj->ff != NULL && pj->th_alive) {
-            enqueue_select(pj, (uint32_t)id, on != 0);
+            enqueue_select(pj, id, on != 0);
+            if (queued != NULL) {
+                *queued = 1;
+            }
         }
 #endif
-        snprintf(buf, sizeof(buf),
+        snprintf(msg, cap,
                  "select id=%u on=%d queued (player busy; worker will apply; UI not blocked)",
                  (unsigned)id, on != 0);
-        return (*env)->NewStringUTF(env, buf);
+        return MS_OK;
     }
-    st = ms_hw_player_select_track(pj->p, (uint32_t)id, on != 0);
+    st = ms_hw_player_select_track(pj->p, id, on != 0);
     if (st == MS_OK) {
         /* 同步 applied_audio_id，避免 worker 稍后 sync 再切一次。 */
-        {
-            ms_hw_player_stats stt;
-            memset(&stt, 0, sizeof(stt));
-            stt.struct_size = sizeof(stt);
-            if (ms_hw_player_get_stats(pj->p, &stt) == MS_OK) {
-                pj->applied_audio_id = stt.audio_track_id;
-                pj->applied_audio_valid = 1;
-            }
+        ms_hw_player_stats stt;
+        memset(&stt, 0, sizeof(stt));
+        stt.struct_size = sizeof(stt);
+        if (ms_hw_player_get_stats(pj->p, &stt) == MS_OK) {
+            pj->applied_audio_id = stt.audio_track_id;
+            pj->applied_audio_valid = 1;
         }
     }
     pthread_mutex_unlock(&pj->op);
 #ifdef MS_HW_HAVE_FF
     if (pj->ff != NULL && pj->th_alive) {
-        enqueue_select(pj, (uint32_t)id, on != 0);
-        snprintf(buf, sizeof(buf),
-                 "select id=%u on=%d player=%s queued-demux (async; not device sound)",
+        enqueue_select(pj, id, on != 0);
+        if (queued != NULL) {
+            *queued = 1;
+        }
+        snprintf(msg, cap, "select id=%u on=%d player=%s queued-demux (async; not device sound)",
                  (unsigned)id, on != 0, ms_status_name(st));
-        return (*env)->NewStringUTF(env, buf);
+        return st;
     }
     if (pj->ff != NULL) {
+        ms_status fst;
         pthread_mutex_lock(&pj->op);
-        st = ms_ff_select_track(pj->ff, (uint32_t)id, on != 0);
-        if (st == MS_OK) {
+        fst = ms_ff_select_track(pj->ff, id, on != 0);
+        if (fst == MS_OK) {
             sync_ff_audio_to_player(pj);
         }
         pthread_mutex_unlock(&pj->op);
-        snprintf(buf, sizeof(buf), "select id=%u on=%d source=%s (no worker; not device sound)",
-                 (unsigned)id, on != 0, ms_status_name(st));
-        return (*env)->NewStringUTF(env, buf);
+        snprintf(msg, cap, "select id=%u on=%d source=%s (no worker; not device sound)",
+                 (unsigned)id, on != 0, ms_status_name(fst));
+        return fst;
     }
 #endif
-    snprintf(buf, sizeof(buf), "select id=%u on=%d -> %s (not device A/V acceptance)",
+    snprintf(msg, cap, "select id=%u on=%d -> %s (not device A/V acceptance)",
              (unsigned)id, on != 0, ms_status_name(st));
+    return st;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSelectTrack(JNIEnv *env, jobject thiz, jlong h,
+                                                      jint id, jint on)
+{
+    player_jni *pj = pj_from(h);
+    char buf[256];
+    (void)thiz;
+    if (pj == NULL || pj->p == NULL) {
+        return (*env)->NewStringUTF(env, "no player");
+    }
+    /* UI 最多等 80ms。 */
+    (void)pj_select_track(pj, (uint32_t)id, on != 0, 80, NULL, buf, sizeof(buf));
     return (*env)->NewStringUTF(env, buf);
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeClearSubtitles(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeClearSubtitles(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     ms_status st;
@@ -2182,13 +2212,41 @@ Java_com_msmedia_MsHwPlayerActivity_nativeClearSubtitles(JNIEnv *env, jobject th
     return (*env)->NewStringUTF(env, buf);
 }
 
+/* 当前播放时刻的字幕 cue（调用方已持 pj->op）。演示 Activity 与 MediaPlayer 共用，
+ * 避免每个 JNI 入口各写一遍 struct_size 初始化 + subtitles_at。返回条数（<=cap）。
+ * by: Long <mycjzb@gmail.com> */
+static size_t pj_cues_now_locked(player_jni *pj, ms_sub_cue *cues, size_t cap)
+{
+    size_t n = 0, i;
+    uint64_t t;
+    if (pj == NULL || pj->p == NULL || cues == NULL || cap == 0) {
+        return 0;
+    }
+    /* 原 nativeCurrentCue 里对 ms_ff_subtitles_at(cap=0) 的调用是只读查询、结果未用，已去掉。 */
+    t = ms_hw_player_last_media_90k(pj->p);
+    memset(cues, 0, cap * sizeof(cues[0]));
+    for (i = 0; i < cap; i++) {
+        cues[i].struct_size = sizeof(cues[i]);
+    }
+    if (ms_hw_player_subtitles_at(pj->p, t, cues, cap, &n) != MS_OK) {
+        n = 0;
+    }
+    return n > cap ? cap : n;
+}
+
+/* 文字 cue 判定：位图不得当文字拷贝。 */
+static int pj_cue_is_text(const ms_sub_cue *c)
+{
+    return c != NULL && (c->style_flags & MS_SUB_STYLE_HAS_BITMAP) == 0 &&
+           c->bitmap_rgba_size == 0 && c->text != NULL && c->text_size > 0;
+}
+
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeCurrentCue(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeCurrentCue(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
-    ms_sub_cue cue;
-    size_t n = 0;
-    uint64_t t;
+    ms_sub_cue cues[8];
+    size_t n;
     char buf[MS_SUB_CUE_TEXT_MAX + 8];
     (void)thiz;
     buf[0] = 0;
@@ -2196,33 +2254,15 @@ Java_com_msmedia_MsHwPlayerActivity_nativeCurrentCue(JNIEnv *env, jobject thiz, 
         return (*env)->NewStringUTF(env, "");
     }
     pthread_mutex_lock(&pj->op);
-    t = ms_hw_player_last_media_90k(pj->p);
-#ifdef MS_HW_HAVE_FF
-    if (pj->ff != NULL) {
-        (void)ms_ff_subtitles_at(pj->ff, t, &cue, 0, NULL);
-    }
-#endif
-    {
-        ms_sub_cue cues[8];
-        size_t i;
-        memset(cues, 0, sizeof(cues));
-        for (i = 0; i < 8; i++) {
-            cues[i].struct_size = sizeof(cues[i]);
+    n = pj_cues_now_locked(pj, cues, 8);
+    if (n > 0 && pj_cue_is_text(&cues[n - 1])) {
+        const ms_sub_cue *top = &cues[n - 1];
+        size_t cpy = top->text_size;
+        if (cpy >= sizeof(buf)) {
+            cpy = sizeof(buf) - 1u;
         }
-        if (ms_hw_player_subtitles_at(pj->p, t, cues, 8, &n) == MS_OK && n > 0) {
-            const ms_sub_cue *top = &cues[n > 8 ? 7 : (n - 1)];
-            size_t cpy;
-            if ((top->style_flags & MS_SUB_STYLE_HAS_BITMAP) == 0 &&
-                top->bitmap_rgba_size == 0 &&
-                top->text != NULL && top->text_size > 0) {
-                cpy = top->text_size;
-                if (cpy >= sizeof(buf)) {
-                    cpy = sizeof(buf) - 1u;
-                }
-                memcpy(buf, top->text, cpy);
-                buf[cpy] = 0;
-            }
-        }
+        memcpy(buf, top->text, cpy);
+        buf[cpy] = 0;
     }
     pthread_mutex_unlock(&pj->op);
     return (*env)->NewStringUTF(env, buf);
@@ -2240,14 +2280,13 @@ Java_com_msmedia_MsHwPlayerActivity_nativeCurrentCue(JNIEnv *env, jobject thiz, 
 
 /* 逻辑接入：把已去标签的 cue 样式填给 Java TextView。不是设备出画验收。 */
 JNIEXPORT jint JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeFillCues(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeFillCues(JNIEnv *env, jobject thiz, jlong h,
                                                    jintArray jmeta, jobjectArray jtexts,
                                                    jintArray jspans)
 {
     player_jni *pj = pj_from(h);
     ms_sub_cue cues[MS_JNI_CUE_MAX];
     size_t n = 0, i, span_w = 0;
-    uint64_t t;
     jint *meta = NULL;
     jint *spans = NULL;
     jsize meta_n, span_n, text_n;
@@ -2262,17 +2301,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeFillCues(JNIEnv *env, jobject thiz, jl
         return 0;
     }
     pthread_mutex_lock(&pj->op);
-    t = ms_hw_player_last_media_90k(pj->p);
-    memset(cues, 0, sizeof(cues));
-    for (i = 0; i < MS_JNI_CUE_MAX; i++) {
-        cues[i].struct_size = sizeof(cues[i]);
-    }
-    if (ms_hw_player_subtitles_at(pj->p, t, cues, MS_JNI_CUE_MAX, &n) != MS_OK) {
-        n = 0;
-    }
-    if (n > MS_JNI_CUE_MAX) {
-        n = MS_JNI_CUE_MAX;
-    }
+    n = pj_cues_now_locked(pj, cues, MS_JNI_CUE_MAX);
     if ((size_t)text_n < n) {
         n = (size_t)text_n;
     }
@@ -2310,9 +2339,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeFillCues(JNIEnv *env, jobject thiz, jl
         m[14] = (jint)cues[i].cap_flags;
         m[15] = (jint)cues[i].span_count;
         /* 位图不得当文字拷贝；HAS_BITMAP 由 style_flags 告知 Java。 */
-        if ((cues[i].style_flags & MS_SUB_STYLE_HAS_BITMAP) == 0 &&
-            cues[i].bitmap_rgba_size == 0 &&
-            cues[i].text != NULL && cues[i].text_size > 0) {
+        if (pj_cue_is_text(&cues[i])) {
             cpy = cues[i].text_size;
             if (cpy >= sizeof(tmp)) {
                 cpy = sizeof(tmp) - 1u;
@@ -2353,13 +2380,12 @@ Java_com_msmedia_MsHwPlayerActivity_nativeFillCues(JNIEnv *env, jobject thiz, jl
 
 
 JNIEXPORT jint JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeFillBitmap(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeFillBitmap(JNIEnv *env, jobject thiz, jlong h,
                                                      jint index, jintArray jgeom, jbyteArray jrgba)
 {
     player_jni *pj = pj_from(h);
     ms_sub_cue cues[MS_JNI_CUE_MAX];
-    size_t n = 0, i;
-    uint64_t t;
+    size_t n = 0;
     jint *geom = NULL;
     jsize geom_n, rgba_n = 0;
     const ms_sub_cue *c;
@@ -2372,14 +2398,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeFillBitmap(JNIEnv *env, jobject thiz, 
         return 0;
     }
     pthread_mutex_lock(&pj->op);
-    t = ms_hw_player_last_media_90k(pj->p);
-    memset(cues, 0, sizeof(cues));
-    for (i = 0; i < MS_JNI_CUE_MAX; i++) {
-        cues[i].struct_size = sizeof(cues[i]);
-    }
-    if (ms_hw_player_subtitles_at(pj->p, t, cues, MS_JNI_CUE_MAX, &n) != MS_OK) {
-        n = 0;
-    }
+    n = pj_cues_now_locked(pj, cues, MS_JNI_CUE_MAX);
     if ((size_t)index >= n) {
         pthread_mutex_unlock(&pj->op);
         return 0;
@@ -2417,24 +2436,35 @@ Java_com_msmedia_MsHwPlayerActivity_nativeFillBitmap(JNIEnv *env, jobject thiz, 
     return (jint)c->bitmap_rgba_size;
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeLoadSubtitle(JNIEnv *env, jobject thiz, jlong h,
-                                                       jbyteArray jdata, jint fmt)
+/* 外挂字幕装载公共实现（演示 Activity 与 MediaPlayer.addTimedTextSource 共用）。
+ * jdata 为空或长度 0 = 清除外挂轨。源（ms_ff）侧失败时不再改播放器侧，*src_fail=1。
+ * 返回最终状态；*nbytes 回填字节数。by: Long <mycjzb@gmail.com> */
+static ms_status pj_load_ext_sub(JNIEnv *env, player_jni *pj, jbyteArray jdata, int fmt,
+                                 int *nbytes, int *src_fail)
 {
-    player_jni *pj = pj_from(h);
     jbyte *bytes = NULL;
     jsize n = 0;
     ms_status st;
-    char buf[192];
-    (void)thiz;
+    if (nbytes != NULL) {
+        *nbytes = 0;
+    }
+    if (src_fail != NULL) {
+        *src_fail = 0;
+    }
     if (pj == NULL || pj->p == NULL) {
-        return (*env)->NewStringUTF(env, "no player");
+        return MS_ERR_STATE;
     }
     if (jdata != NULL) {
         n = (*env)->GetArrayLength(env, jdata);
         if (n > 0) {
             bytes = (*env)->GetByteArrayElements(env, jdata, NULL);
+            if (bytes == NULL) {
+                return MS_ERR_NOMEM;
+            }
         }
+    }
+    if (nbytes != NULL) {
+        *nbytes = (int)n;
     }
     pthread_mutex_lock(&pj->op);
 #ifdef MS_HW_HAVE_FF
@@ -2445,11 +2475,11 @@ Java_com_msmedia_MsHwPlayerActivity_nativeLoadSubtitle(JNIEnv *env, jobject thiz
                                          (ms_sub_format)fmt);
         if (st != MS_OK && bytes != NULL) {
             pthread_mutex_unlock(&pj->op);
-            if (bytes) {
-                (*env)->ReleaseByteArrayElements(env, jdata, bytes, JNI_ABORT);
+            (*env)->ReleaseByteArrayElements(env, jdata, bytes, JNI_ABORT);
+            if (src_fail != NULL) {
+                *src_fail = 1;
             }
-            snprintf(buf, sizeof(buf), "source ext sub: %s", ms_status_name(st));
-            return (*env)->NewStringUTF(env, buf);
+            return st;
         }
     }
 #endif
@@ -2461,14 +2491,34 @@ Java_com_msmedia_MsHwPlayerActivity_nativeLoadSubtitle(JNIEnv *env, jobject thiz
     if (bytes) {
         (*env)->ReleaseByteArrayElements(env, jdata, bytes, JNI_ABORT);
     }
-    snprintf(buf, sizeof(buf), "ext sub bytes=%d fmt=%d -> %s (overlay only; not device paint acceptance)",
-             (int)n, (int)fmt, ms_status_name(st));
+    return st;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeLoadSubtitle(JNIEnv *env, jobject thiz, jlong h,
+                                                       jbyteArray jdata, jint fmt)
+{
+    player_jni *pj = pj_from(h);
+    int n = 0, src_fail = 0;
+    ms_status st;
+    char buf[192];
+    (void)thiz;
+    if (pj == NULL || pj->p == NULL) {
+        return (*env)->NewStringUTF(env, "no player");
+    }
+    st = pj_load_ext_sub(env, pj, jdata, (int)fmt, &n, &src_fail);
+    if (src_fail) {
+        snprintf(buf, sizeof(buf), "source ext sub: %s", ms_status_name(st));
+    } else {
+        snprintf(buf, sizeof(buf), "ext sub bytes=%d fmt=%d -> %s (overlay only; not device paint acceptance)",
+                 n, (int)fmt, ms_status_name(st));
+    }
     return (*env)->NewStringUTF(env, buf);
 }
 
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativePause(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativePause(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     ms_status st;
@@ -2483,7 +2533,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativePause(JNIEnv *env, jobject thiz, jlong
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeResume(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeResume(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     ms_status st;
@@ -2498,7 +2548,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeResume(JNIEnv *env, jobject thiz, jlon
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeNotifyAudioFocus(JNIEnv *env, jobject thiz,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeNotifyAudioFocus(JNIEnv *env, jobject thiz,
                                                           jlong h, jint ev)
 {
     player_jni *pj = pj_from(h);
@@ -2522,7 +2572,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeNotifyAudioFocus(JNIEnv *env, jobject 
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeSetRate(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSetRate(JNIEnv *env, jobject thiz, jlong h,
                                                   jint num, jint den)
 {
     player_jni *pj = pj_from(h);
@@ -2553,7 +2603,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeSetRate(JNIEnv *env, jobject thiz, jlo
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeRateCaps(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeRateCaps(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     ms_hw_rate_caps caps;
@@ -2609,7 +2659,7 @@ static jstring queue_seek_abs(JNIEnv *env, player_jni *pj, int64_t time_90k)
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeSeek(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSeek(JNIEnv *env, jobject thiz, jlong h,
                                                jlong time90k)
 {
     (void)thiz;
@@ -2617,7 +2667,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeSeek(JNIEnv *env, jobject thiz, jlong 
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeSeekRelative(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSeekRelative(JNIEnv *env, jobject thiz, jlong h,
                                                        jlong delta90k)
 {
     player_jni *pj = pj_from(h);
@@ -2671,7 +2721,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeSeekRelative(JNIEnv *env, jobject thiz
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativePosition(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativePosition(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     char buf[256];
@@ -2726,7 +2776,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativePosition(JNIEnv *env, jobject thiz, jl
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeSeekLiveEdge(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSeekLiveEdge(JNIEnv *env, jobject thiz, jlong h)
 {
     char buf[192];
     player_jni *pj = pj_from(h);
@@ -2757,7 +2807,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeSeekLiveEdge(JNIEnv *env, jobject thiz
 
 
 JNIEXPORT jint JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeAssAvailable(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeAssAvailable(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     int loaded = 0, has = 0;
@@ -2779,7 +2829,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeAssAvailable(JNIEnv *env, jobject thiz
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeAssSetCanvas(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeAssSetCanvas(JNIEnv *env, jobject thiz, jlong h,
                                                        jint canvas_w, jint canvas_h)
 {
     player_jni *pj = pj_from(h);
@@ -2799,7 +2849,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeAssSetCanvas(JNIEnv *env, jobject thiz
 }
 
 JNIEXPORT jint JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeFillAssFrame(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeFillAssFrame(JNIEnv *env, jobject thiz, jlong h,
                                                        jintArray jgeom, jbyteArray jrgba)
 {
     player_jni *pj = pj_from(h);
@@ -2854,7 +2904,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeFillAssFrame(JNIEnv *env, jobject thiz
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeAiStatus(JNIEnv *env, jobject thiz, jlong h)
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeAiStatus(JNIEnv *env, jobject thiz, jlong h)
 {
     player_jni *pj = pj_from(h);
     const char *s;
@@ -2869,7 +2919,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeAiStatus(JNIEnv *env, jobject thiz, jl
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeAiConfigure(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeAiConfigure(JNIEnv *env, jobject thiz, jlong h,
                                                       jint vendor, jstring jsrc, jstring jtgt)
 {
     player_jni *pj = pj_from(h);
@@ -2904,7 +2954,7 @@ Java_com_msmedia_MsHwPlayerActivity_nativeAiConfigure(JNIEnv *env, jobject thiz,
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwPlayerActivity_nativeAiSetEnabled(JNIEnv *env, jobject thiz, jlong h,
+Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeAiSetEnabled(JNIEnv *env, jobject thiz, jlong h,
                                                        jint on)
 {
     player_jni *pj = pj_from(h);

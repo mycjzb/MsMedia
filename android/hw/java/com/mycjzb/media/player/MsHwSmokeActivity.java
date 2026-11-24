@@ -3,7 +3,7 @@
  * 不以本界面出现宣称真实硬解已跑通。
  * by: Long <mycjzb@gmail.com>
  */
-package com.msmedia;
+package com.mycjzb.media.player;
 
 import android.app.Activity;
 import android.os.Bundle;

@@ -5,7 +5,7 @@
  * 不把私密 URL 写入日志。
  * by: Long <mycjzb@gmail.com>
  */
-package com.msmedia;
+package com.mycjzb.media.player;
 
 import android.app.Activity;
 import android.content.BroadcastReceiver;
@@ -79,7 +79,7 @@ public class MsHwPlayerActivity extends Activity implements SurfaceHolder.Callba
     private AudioManager audioMgr;
     private AudioManager.OnAudioFocusChangeListener focusListener;
     private AudioFocusRequest focusRequest;
-    static final String DEBUG_CMD_ACTION = "com.msmedia.DEBUG_CMD";
+    static final String DEBUG_CMD_ACTION = "com.mycjzb.media.player.DEBUG_CMD";
     private BroadcastReceiver debugReceiver;
     private GestureDetector gestures;
     /* 0=铺满 stage，1=16:9 信箱，2=居中裁切（放大）。 */
@@ -418,7 +418,7 @@ public class MsHwPlayerActivity extends Activity implements SurfaceHolder.Callba
         }
     }
 
-    /** adb: am broadcast -a com.msmedia.DEBUG_CMD --es cmd stats|pause|resume|seek|seek_rel|next_audio|next_sub|sub_off|pos|rate|load_sub|lyric|aspect|shot|savepos|loadpos
+    /** adb: am broadcast -a com.mycjzb.media.player.DEBUG_CMD --es cmd stats|pause|resume|seek|seek_rel|next_audio|next_sub|sub_off|pos|rate|load_sub|lyric|aspect|shot|savepos|loadpos
      *  extras: time_ms / time_90k / delta_ms / delta_90k / path / num / den。不记录 URL。 */
     void applyDebugCmd(Intent in) {
         if (in == null) {

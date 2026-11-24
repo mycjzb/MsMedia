@@ -1,24 +1,28 @@
 /*
  * 与系统 android.media.MediaPlayer 对齐的公开封装：同名方法 / 重载 / 常量 / 监听器，
- * 便于业务把 import android.media.MediaPlayer 换成 com.msmedia.MediaPlayer。
+ * 便于业务把 import android.media.MediaPlayer 换成 com.mycjzb.media.player.MediaPlayer。
  * 底层只加载合并后的单个 libmsplayer.so（路线 A 纯自研 / 路线 B 精简 FFmpeg 产物同名，本类共用）。
  * 阶段 2：已接原生通道（prepare/start/pause/stop/reset/release/seek/位置/时长/音量/循环/
  * Surface/倍速/七个监听器）。对 Java 一律毫秒，90 kHz 只在原生层换算。
+ * 阶段 7：补齐选轨与字幕（getTrackInfo / selectTrack / deselectTrack / getSelectedTrack /
+ * OnTimedTextListener / addTimedTextSource），复用内核已有的选轨与 ms_sub 字幕实现。
  * 不能播放的输入（例如路线 A 的网络地址、带偏移的 fd、需要自定义请求头的地址）prepare 诚实失败。
  * 不记录完整私有 URL。不是设备出画/出声验收。
  * by: Long <mycjzb@gmail.com>
  */
-package com.msmedia;
+package com.mycjzb.media.player;
 
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.res.AssetFileDescriptor;
+import android.graphics.Rect;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.media.MediaFormat;
 import android.os.Build;
 import android.provider.Settings;
 import android.media.PlaybackParams;
@@ -30,8 +34,14 @@ import android.os.SystemClock;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 
+import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.Charset;
 import java.util.Map;
 
 public class MediaPlayer {
@@ -59,6 +69,13 @@ public class MediaPlayer {
     public static final int MEDIA_INFO_METADATA_UPDATE = 802;
     public static final int MEDIA_INFO_UNSUPPORTED_SUBTITLE = 901;
     public static final int MEDIA_INFO_SUBTITLE_TIMED_OUT = 902;
+
+    /** 外挂字幕 MIME（与系统同值）。 */
+    public static final String MEDIA_MIMETYPE_TEXT_SUBRIP = "application/x-subrip";
+    /** MsMedia 扩展：外挂 WebVTT 字幕。 */
+    public static final String MEDIA_MIMETYPE_TEXT_VTT = "text/vtt";
+    /** MsMedia 扩展：外挂 ASS/SSA 字幕（只取文字，不做特效渲染）。 */
+    public static final String MEDIA_MIMETYPE_TEXT_SSA = "text/x-ssa";
 
     /** API 26 seek 模式，值与系统一致。原生层统一按关键帧对齐 seek。 */
     public static final int SEEK_PREVIOUS_SYNC = 0;
@@ -153,6 +170,32 @@ public class MediaPlayer {
     private OnSeekCompleteListener onSeekComplete;
     private OnBufferingUpdateListener onBufferingUpdate;
     private OnVideoSizeChangedListener onVideoSizeChanged;
+    private OnTimedTextListener onTimedText;
+
+    /* 选轨与字幕（阶段 7）。by: Long <mycjzb@gmail.com> */
+    private static final int TRACK_MAX = 32;           /* 与原生 MP_TRACK_MAX 一致 */
+    private static final int TRACK_META = 8;           /* 与原生 MP_TRACK_META 一致 */
+    private static final int TRACK_STRS = 3;           /* 与原生 MP_TRACK_STRS 一致 */
+    private static final int CUE_META = 12;            /* 与原生 MP_CUE_META 一致 */
+    private static final int MS_ERR_UNSUPPORTED = 4;   /* ms_status，见 msmedia.h */
+    private static final int SUB_FMT_AUTO = 0, SUB_FMT_SRT = 1, SUB_FMT_WEBVTT = 2; /* ms_sub_format */
+    private static final int TIMED_TEXT_MAX_BYTES = 16 << 20; /* 外挂字幕文件上限，防 OOM */
+    private static final Charset UTF8 = Charset.forName("UTF-8");
+    private final int[] trackMeta = new int[TRACK_MAX * TRACK_META];
+    private final String[] trackStrs = new String[TRACK_MAX * TRACK_STRS];
+    private final int[] cueMeta = new int[CUE_META];
+    private TrackInfo[] lastTracks = new TrackInfo[0]; /* 原生忙时返回上次结果 */
+    private byte[] extSubData;    /* addTimedTextSource 读入的整个文件；每次 prepare 成功后重新交给原生 */
+    private int extSubFmt;
+    private boolean extSubApplied; /* 原生里是否还挂着外挂字幕（reset 后在下次 prepare 时清掉） */
+    private String lastCueKey;     /* 上次派发的字幕（开始时间|轨|文字），null = 当前无字幕 */
+    private boolean cueDirty;      /* 选轨变化后强制重新派发一次 */
+    private String lastCueText;
+    /* 用户刚选的音轨（内核在读到新轨数据后才提交切换，期间仍播旧轨）；提交前 getSelectedTrack 报它，
+     * 与系统 selectTrack 返回后立即可查的语义一致。0 = 无。 */
+    private int pendingAudioId;
+    private boolean pendingAudioSet;
+    private static final int SUB_STYLE_HAS_POS = 1 << 6; /* MS_SUB_STYLE_HAS_POS */
 
     private final Runnable poller = new Runnable() {
         @Override
@@ -522,6 +565,9 @@ public class MediaPlayer {
         seeking = false;
         lastW = 0;
         lastH = 0;
+        lastCueKey = null;
+        pendingAudioSet = false;
+        applyTimedTextSourceLocked();
         schedulePollLocked();
     }
 
@@ -609,6 +655,9 @@ public class MediaPlayer {
             seeking = false;
             lastDurMs = -1;
             lastPosMs = 0;
+            extSubData = null; /* 系统语义：reset 清掉外挂字幕；原生侧在下次 prepare 时清（不在这里阻塞等锁） */
+            lastTracks = new TrackInfo[0];
+            lastCueKey = null;
             state = S_IDLE;
         }
     }
@@ -632,6 +681,8 @@ public class MediaPlayer {
             onSeekComplete = null;
             onBufferingUpdate = null;
             onVideoSizeChanged = null;
+            onTimedText = null;
+            extSubData = null;
         }
         if (h != 0) {
             nativeStop(h);
@@ -1042,6 +1093,441 @@ public class MediaPlayer {
         }
     }
 
+    /* ---------------- 选轨与字幕（对齐系统 API 16/21 签名，by: Long <mycjzb@gmail.com>） ---------------- */
+
+    /**
+     * 与系统 MediaPlayer.TrackInfo 对齐：轨道类型、语言、格式。
+     * 文字字幕（SRT/WebVTT/tx3g/ASS 文字）报 TIMEDTEXT，走 {@link OnTimedTextListener}；
+     * 位图字幕（DVB/PGS/VobSub）报 SUBTITLE，可选中但本类不回调位图。
+     * 下标即 {@link #selectTrack(int)} 用的 index，与 getTrackInfo() 返回数组一致。
+     */
+    public static class TrackInfo {
+        public static final int MEDIA_TRACK_TYPE_UNKNOWN = 0;
+        public static final int MEDIA_TRACK_TYPE_VIDEO = 1;
+        public static final int MEDIA_TRACK_TYPE_AUDIO = 2;
+        public static final int MEDIA_TRACK_TYPE_TIMEDTEXT = 3;
+        public static final int MEDIA_TRACK_TYPE_SUBTITLE = 4;
+        public static final int MEDIA_TRACK_TYPE_METADATA = 5;
+
+        final int id;          /* 内核轨 id（TS 为 PID；外挂字幕为 0xFFFF0001） */
+        final boolean selected;
+        private final int type;
+        private final String language;
+        private final String mime;
+        private final String name;
+        private final boolean isDefault;
+        private final boolean isForced;
+
+        TrackInfo(int id, int type, boolean selected, boolean isDefault, boolean isForced,
+                  String language, String mime, String name) {
+            this.id = id;
+            this.type = type;
+            this.selected = selected;
+            this.isDefault = isDefault;
+            this.isForced = isForced;
+            this.language = (language == null || language.length() == 0) ? "und" : language;
+            this.mime = mime;
+            this.name = name;
+        }
+
+        public int getTrackType() {
+            return type;
+        }
+
+        TrackInfo withSelected(boolean sel) {
+            return sel == selected ? this
+                    : new TrackInfo(id, type, sel, isDefault, isForced, language, mime, name);
+        }
+
+        /** ISO-639 语言码（容器原样，常见是 3 字母）；未知返回 "und"，与系统一致。 */
+        public String getLanguage() {
+            return language;
+        }
+
+        /**
+         * 与系统一致：只有 TIMEDTEXT / SUBTITLE 轨返回 MediaFormat（含 mime、language、
+         * is-default、is-forced-subtitle），音视频轨返回 null。音视频的 mime 用 {@link #getMime()}。
+         */
+        public MediaFormat getFormat() {
+            if (type != MEDIA_TRACK_TYPE_TIMEDTEXT && type != MEDIA_TRACK_TYPE_SUBTITLE) {
+                return null;
+            }
+            MediaFormat f = new MediaFormat();
+            f.setString(MediaFormat.KEY_MIME, mime);
+            f.setString("language", language);
+            f.setInteger("is-default", isDefault ? 1 : 0);
+            f.setInteger("is-forced-subtitle", isForced ? 1 : 0);
+            return f;
+        }
+
+        /** MsMedia 扩展：任意轨的 MIME（如 video/avc、audio/ac3、application/x-subrip）。 */
+        public String getMime() {
+            return mime;
+        }
+
+        /** MsMedia 扩展：容器里的轨道名（可能为 null）；外挂字幕为 "external"。 */
+        public String getName() {
+            return name;
+        }
+
+        @Override
+        public String toString() {
+            String t;
+            switch (type) {
+                case MEDIA_TRACK_TYPE_VIDEO: t = "VIDEO"; break;
+                case MEDIA_TRACK_TYPE_AUDIO: t = "AUDIO"; break;
+                case MEDIA_TRACK_TYPE_TIMEDTEXT: t = "TIMEDTEXT"; break;
+                case MEDIA_TRACK_TYPE_SUBTITLE: t = "SUBTITLE"; break;
+                default: t = "UNKNOWN"; break;
+            }
+            return "TrackInfo{" + t + ", " + mime + ", " + language + (selected ? ", selected" : "") + "}";
+        }
+    }
+
+    /**
+     * 与系统一致：返回当前所有轨道。须在 prepare 完成后调用（Prepared/Started/Paused/Stopped/
+     * PlaybackCompleted），否则抛 IllegalStateException。
+     */
+    public TrackInfo[] getTrackInfo() throws IllegalStateException {
+        synchronized (lock) {
+            requireState("getTrackInfo", S_PREPARED, S_STARTED, S_PAUSED, S_STOPPED, S_PLAYBACK_COMPLETED);
+            TrackInfo[] t = listTracksLocked();
+            TrackInfo[] copy = new TrackInfo[t.length];
+            System.arraycopy(t, 0, copy, 0, t.length);
+            return copy;
+        }
+    }
+
+    /**
+     * 与系统一致：选中一条音轨 / 文字字幕 / 位图字幕，同类的其它轨自动取消。视频轨不能选
+     * （抛 IllegalArgumentException）。下标越界抛 IllegalArgumentException，状态不对抛 IllegalStateException。
+     * 字幕格式不支持时不抛异常，回调 onInfo(MEDIA_INFO_UNSUPPORTED_SUBTITLE)。
+     */
+    public void selectTrack(int index) throws IllegalStateException {
+        selectOrDeselectTrack(index, true);
+    }
+
+    /** 与系统一致：只能取消字幕轨（TIMEDTEXT/SUBTITLE），音视频轨抛 IllegalArgumentException。 */
+    public void deselectTrack(int index) throws IllegalStateException {
+        selectOrDeselectTrack(index, false);
+    }
+
+    /** 与系统（API 21）一致：返回某类型当前选中轨的下标，没有返回 -1。 */
+    public int getSelectedTrack(int trackType) throws IllegalStateException {
+        synchronized (lock) {
+            requireState("getSelectedTrack", S_PREPARED, S_STARTED, S_PAUSED, S_STOPPED, S_PLAYBACK_COMPLETED);
+            TrackInfo[] t = listTracksLocked();
+            for (int i = 0; i < t.length; i++) {
+                if (t[i].selected && t[i].getTrackType() == trackType) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+    }
+
+    private void selectOrDeselectTrack(int index, boolean on) {
+        boolean unsupported = false;
+        synchronized (lock) {
+            String op = on ? "selectTrack" : "deselectTrack";
+            requireState(op, S_PREPARED, S_STARTED, S_PAUSED, S_PLAYBACK_COMPLETED);
+            TrackInfo[] t = listTracksLocked();
+            if (index < 0 || index >= t.length) {
+                throw new IllegalArgumentException(op + ": index " + index + " out of range (" + t.length + " tracks)");
+            }
+            int type = t[index].getTrackType();
+            boolean isText = isTextType(type);
+            if (!isText && type != TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
+                throw new IllegalArgumentException(op + ": only audio, timed text or subtitle tracks can be selected");
+            }
+            if (!on && !isText) {
+                throw new IllegalArgumentException("deselectTrack: audio track cannot be deselected");
+            }
+            if (on && isText) {
+                /* 与系统一致：同一时间只有一条字幕轨，选新轨前先关掉其它已选字幕轨 */
+                for (int i = 0; i < t.length; i++) {
+                    if (i != index && t[i].selected && isTextType(t[i].getTrackType())) {
+                        nativeSelectTrack(nh, t[i].id, false);
+                    }
+                }
+            }
+            int rc = nativeSelectTrack(nh, t[index].id, on);
+            if (rc == MS_ERR_UNSUPPORTED && isText) {
+                unsupported = true;
+            } else if (rc != 0) {
+                throw new IllegalStateException(op + " failed, status " + rc);
+            }
+            if (isText) {
+                cueDirty = true; /* 换字幕轨后立即按新轨重新派发 */
+                if (!unsupported) {
+                    markTextSelectedLocked(t, index, on);
+                }
+            } else {
+                pendingAudioId = t[index].id;
+                pendingAudioSet = !t[index].selected;
+            }
+        }
+        if (unsupported) {
+            postInfo(MEDIA_INFO_UNSUPPORTED_SUBTITLE, 0);
+        }
+    }
+
+    private static boolean isTextType(int type) {
+        return type == TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT || type == TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE;
+    }
+
+    /** 字幕选轨成功后同步更新缓存，原生忙时 getSelectedTrack 也能报新状态。 */
+    private void markTextSelectedLocked(TrackInfo[] t, int index, boolean on) {
+        TrackInfo[] c = new TrackInfo[t.length];
+        for (int i = 0; i < t.length; i++) {
+            if (i == index) {
+                c[i] = t[i].withSelected(on);
+            } else if (on && isTextType(t[i].getTrackType())) {
+                c[i] = t[i].withSelected(false);
+            } else {
+                c[i] = t[i];
+            }
+        }
+        lastTracks = c;
+    }
+
+    /** 持锁读取原生轨道表；原生忙（拿不到锁）时返回上次结果。 */
+    private TrackInfo[] listTracksLocked() {
+        if (nh == 0) {
+            return lastTracks;
+        }
+        int n = -1;
+        for (int tries = 0; tries < 3 && n < 0; tries++) {
+            java.util.Arrays.fill(trackStrs, null);
+            n = nativeGetTracks(nh, trackMeta, trackStrs);
+            if (n >= 0 || lastTracks.length > 0) {
+                break; /* 有旧结果就不再等 */
+            }
+        }
+        if (n < 0) {
+            return overlayPendingAudio(lastTracks);
+        }
+        if (n > TRACK_MAX) {
+            n = TRACK_MAX;
+        }
+        TrackInfo[] t = new TrackInfo[n];
+        for (int i = 0; i < n; i++) {
+            int m = i * TRACK_META;
+            int s = i * TRACK_STRS;
+            boolean sel = trackMeta[m + 3] != 0;
+            if (pendingAudioSet && trackMeta[m + 1] == TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
+                if (trackMeta[m] == pendingAudioId && sel) {
+                    pendingAudioSet = false; /* 内核已提交 */
+                }
+            }
+            t[i] = new TrackInfo(trackMeta[m], trackMeta[m + 1], sel,
+                    trackMeta[m + 4] != 0, trackMeta[m + 5] != 0,
+                    trackStrs[s], trackStrs[s + 1], trackStrs[s + 2]);
+        }
+        lastTracks = t;
+        return overlayPendingAudio(t);
+    }
+
+    /** 内核提交音轨切换前，音轨选中状态按用户请求报（返回新数组，不改缓存）。 */
+    private TrackInfo[] overlayPendingAudio(TrackInfo[] src) {
+        if (!pendingAudioSet) {
+            return src;
+        }
+        TrackInfo[] t = new TrackInfo[src.length];
+        for (int i = 0; i < src.length; i++) {
+            t[i] = src[i].getTrackType() == TrackInfo.MEDIA_TRACK_TYPE_AUDIO
+                    ? src[i].withSelected(src[i].id == pendingAudioId) : src[i];
+        }
+        return t;
+    }
+
+    /**
+     * 与系统一致：添加外挂字幕文件。支持 {@link #MEDIA_MIMETYPE_TEXT_SUBRIP}（SRT），
+     * 另支持 {@link #MEDIA_MIMETYPE_TEXT_VTT}、{@link #MEDIA_MIMETYPE_TEXT_SSA}（MsMedia 扩展）；
+     * 其它 MIME 抛 IllegalArgumentException。可在 setDataSource 之后任何时候调用，prepare 前添加的
+     * 在 prepare 完成后生效。添加后作为一条 TIMEDTEXT 轨出现在 getTrackInfo() 末尾，默认不选中，
+     * 需 selectTrack 打开。限制：同一时间只挂一个外挂文件，再次添加会替换上一个。
+     */
+    public void addTimedTextSource(String path, String mimeType)
+            throws IOException, IllegalArgumentException, IllegalStateException {
+        int fmt = timedTextFormat(mimeType);
+        requireTimedTextState();
+        if (path == null) {
+            throw new IllegalArgumentException("path is null");
+        }
+        Uri u = Uri.parse(path);
+        String file = "file".equalsIgnoreCase(u.getScheme()) ? u.getPath() : path;
+        FileInputStream in = new FileInputStream(file);
+        try {
+            setTimedTextSource(readLimited(in), fmt);
+        } finally {
+            in.close();
+        }
+    }
+
+    public void addTimedTextSource(Context context, Uri uri, String mimeType)
+            throws IOException, IllegalArgumentException, IllegalStateException {
+        int fmt = timedTextFormat(mimeType);
+        requireTimedTextState();
+        if (context == null || uri == null) {
+            throw new IllegalArgumentException("context/uri is null");
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null || "file".equalsIgnoreCase(scheme)) {
+            addTimedTextSource(uri.getPath(), mimeType);
+            return;
+        }
+        InputStream in = context.getContentResolver().openInputStream(uri);
+        if (in == null) {
+            throw new IOException("cannot open timed text uri");
+        }
+        try {
+            setTimedTextSource(readLimited(in), fmt);
+        } finally {
+            in.close();
+        }
+    }
+
+    public void addTimedTextSource(FileDescriptor fd, String mimeType)
+            throws IllegalArgumentException, IllegalStateException {
+        addTimedTextSource(fd, 0, 0x7ffffffffffffffL, mimeType);
+    }
+
+    /** fd 由调用方负责关闭（与系统一致）；这里用定位读取，不改变 fd 当前偏移。 */
+    public void addTimedTextSource(FileDescriptor fd, long offset, long length, String mime)
+            throws IllegalArgumentException, IllegalStateException {
+        int fmt = timedTextFormat(mime);
+        requireTimedTextState();
+        if (fd == null || offset < 0 || length < 0) {
+            throw new IllegalArgumentException("bad fd/offset/length");
+        }
+        byte[] data;
+        try {
+            /* 不 close：FileInputStream(fd).close() 会关掉调用方的 fd。 */
+            FileChannel ch = new FileInputStream(fd).getChannel();
+            long size = ch.size();
+            long n = Math.min(length, Math.max(0L, size - offset));
+            if (n > TIMED_TEXT_MAX_BYTES) {
+                throw new IllegalArgumentException("timed text source too large: " + n);
+            }
+            ByteBuffer bb = ByteBuffer.allocate((int) n);
+            long pos = offset;
+            while (bb.hasRemaining()) {
+                int r = ch.read(bb, pos);
+                if (r <= 0) {
+                    break;
+                }
+                pos += r;
+            }
+            data = new byte[bb.position()];
+            System.arraycopy(bb.array(), 0, data, 0, data.length);
+            setTimedTextSource(data, fmt);
+        } catch (IOException e) {
+            /* 系统该重载不声明 IOException；读失败按参数错误报。 */
+            throw new IllegalArgumentException("cannot read timed text fd: " + e.getMessage());
+        }
+    }
+
+    private static int timedTextFormat(String mime) {
+        if (MEDIA_MIMETYPE_TEXT_SUBRIP.equals(mime)) {
+            return SUB_FMT_SRT;
+        }
+        if (MEDIA_MIMETYPE_TEXT_VTT.equals(mime)) {
+            return SUB_FMT_WEBVTT;
+        }
+        if (MEDIA_MIMETYPE_TEXT_SSA.equals(mime)) {
+            return SUB_FMT_AUTO; /* ASS / SSA 由内核按脚本头自动区分 */
+        }
+        throw new IllegalArgumentException("Illegal mimeType for timed text source: " + mime);
+    }
+
+    private static byte[] readLimited(InputStream in) throws IOException {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream(8192);
+        byte[] buf = new byte[8192];
+        long total = 0;
+        int r;
+        while ((r = in.read(buf)) > 0) {
+            total += r;
+            if (total > TIMED_TEXT_MAX_BYTES) {
+                throw new IOException("timed text source too large (> " + TIMED_TEXT_MAX_BYTES + " bytes)");
+            }
+            bo.write(buf, 0, r);
+        }
+        return bo.toByteArray();
+    }
+
+    /** 先查状态再读文件：状态不对时直接抛 IllegalStateException，不做无用 I/O。 */
+    private void requireTimedTextState() {
+        synchronized (lock) {
+            requireTimedTextStateLocked();
+        }
+    }
+
+    private void requireTimedTextStateLocked() {
+        requireState("addTimedTextSource", S_INITIALIZED, S_PREPARED, S_STARTED, S_PAUSED, S_STOPPED,
+                S_PLAYBACK_COMPLETED);
+    }
+
+    private void setTimedTextSource(byte[] data, int fmt) throws IllegalArgumentException {
+        synchronized (lock) {
+            requireTimedTextStateLocked(); /* 读文件期间状态可能变了，再查一次 */
+            if (data == null || data.length == 0) {
+                throw new IllegalArgumentException("empty timed text source");
+            }
+            extSubData = data;
+            extSubFmt = fmt;
+            if (state == S_INITIALIZED || state == S_STOPPED) {
+                return; /* prepare 完成后在 onPreparedLocked 里交给原生 */
+            }
+            int rc = applyTimedTextSourceLocked();
+            if (rc != 0) {
+                extSubData = null;
+                throw new IllegalArgumentException("timed text source rejected (parse failed), status " + rc);
+            }
+        }
+    }
+
+    /** 把 Java 侧保存的外挂字幕交给原生；没有则清掉原生残留。返回 ms_status。 */
+    private int applyTimedTextSourceLocked() {
+        if (nh == 0) {
+            return 0;
+        }
+        if (extSubData == null) {
+            if (extSubApplied) {
+                nativeAddTimedText(nh, null, 0);
+                extSubApplied = false;
+            }
+            return 0;
+        }
+        int rc = nativeAddTimedText(nh, extSubData, extSubFmt);
+        extSubApplied = rc == 0;
+        return rc;
+    }
+
+    /** 主线程轮询：取当前文字字幕，和上次不同返回 true（lastCueKey 已更新）。 */
+    private boolean pollCueLocked() {
+        byte[] b = nativeGetCue(nh, cueMeta);
+        if (cueMeta[9] < 0) {
+            return false; /* 原生忙，保持上次 */
+        }
+        String txt = b == null ? null : new String(b, UTF8);
+        String key = txt == null ? null : cueMeta[0] + "|" + cueMeta[2] + "|" + txt;
+        boolean wasShown = lastCueKey != null;
+        boolean changed = key == null ? wasShown : (cueDirty || !key.equals(lastCueKey));
+        cueDirty = false;
+        lastCueKey = key;
+        lastCueText = txt;
+        return changed;
+    }
+
+    private TimedText buildCueLocked() {
+        Rect r = null;
+        if ((cueMeta[3] & SUB_STYLE_HAS_POS) != 0) {
+            r = new Rect(cueMeta[4], cueMeta[5], cueMeta[4], cueMeta[5]);
+        }
+        return new TimedText(lastCueText, r, cueMeta[0], cueMeta[1], cueMeta[8]);
+    }
+
     /* ---------------- 监听器 ---------------- */
 
     public void setOnPreparedListener(OnPreparedListener listener) {
@@ -1084,6 +1570,18 @@ public class MediaPlayer {
         synchronized (lock) {
             onVideoSizeChanged = listener;
         }
+    }
+
+    /** 与系统相同：文字字幕出现/变化时回调；字幕消失时 text 为 null。主线程回调。 */
+    public void setOnTimedTextListener(OnTimedTextListener listener) {
+        synchronized (lock) {
+            onTimedText = listener;
+            cueDirty = true;
+        }
+    }
+
+    public interface OnTimedTextListener {
+        void onTimedText(MediaPlayer mp, TimedText text);
     }
 
     public interface OnPreparedListener {
@@ -1145,9 +1643,17 @@ public class MediaPlayer {
         boolean buffering = false;
         int errExtra = 0;
         int w, h;
+        TimedText cue = null;
+        boolean cueChanged = false;
+        OnTimedTextListener ttl;
         synchronized (lock) {
             if (nh == 0 || !(state == S_PREPARED || state == S_STARTED || state == S_PAUSED)) {
                 return;
+            }
+            ttl = onTimedText;
+            if (ttl != null) {
+                cueChanged = pollCueLocked();
+                cue = cueChanged && lastCueKey != null ? buildCueLocked() : null;
             }
             int oldW = lastW;
             int oldH = lastH;
@@ -1187,6 +1693,9 @@ public class MediaPlayer {
         }
         if (sizeChanged) {
             fireVideoSize(w, h);
+        }
+        if (cueChanged) {
+            ttl.onTimedText(this, cue);
         }
         if (buffering) {
             OnBufferingUpdateListener l;
@@ -1385,4 +1894,8 @@ public class MediaPlayer {
     private static native void nativeSetTlsVerify(long h, boolean strict);
     private static native void nativeSetAudioPassthrough(long h, int caps);
     private static native int nativeGetAudioPassthroughRoute(long h);
+    private static native int nativeGetTracks(long h, int[] meta, String[] strs);
+    private static native int nativeSelectTrack(long h, int id, boolean on);
+    private static native byte[] nativeGetCue(long h, int[] meta);
+    private static native int nativeAddTimedText(long h, byte[] data, int fmt);
 }

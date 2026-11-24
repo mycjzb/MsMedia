@@ -3,7 +3,7 @@
 日期：2026-11-24（Asia/Shanghai）。by: Long <mycjzb@gmail.com>
 
 对照对象：`docs/DESIGN.md`、`FEATURE_MATRIX.md`、`COMPATIBILITY.md`、`FFMPEG_BACKEND.md`、`HW_ANDROID.md`、
-`ROADMAP.md`、`SECURITY.md`、`THIRD_PARTY.md`、`PROGRESS.md`、`include/msmedia/msmedia.h`、`android/hw/java/com/msmedia/`。
+`ROADMAP.md`、`SECURITY.md`、`THIRD_PARTY.md`、`PROGRESS.md`、`include/msmedia/msmedia.h`、`android/hw/java/com/mycjzb/media/player/`。
 审计产物：`build/android-*/single-slimff-adec-s6/oz-flto/libmsplayer.so`（精简 FFmpeg 9.1 s6 + 裁剪 OpenSSL 3.5.9 静态 + Media3 风格 HLS 预下载）。
 
 分三类：
@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 单 `libmsplayer.so`，NEEDED 只有系统库 + libz | A | `scripts/single_s6_verify.sh` 4 ABI 全过：NEEDED = libandroid/libc/libdl/liblog/libm/libz，无 libssl/libcrypto，无 RELR（API 18 可加载） |
 | `MediaPlayer` 1:1：setDataSource/prepare(Async)/start/pause/stop/reset/release/seekTo/位置时长/音量/循环/倍速/各 Listener | A | Java 层同名同语义；模拟器生命周期（seek/暂停/恢复/释放）回归通过 |
-| `MediaPlayer` 1:1：`getTrackInfo`/`selectTrack`/`deselectTrack`/`addTimedTextSource`/`OnTimedTextListener`/`OnSubtitleDataListener` | **B（未修）** | Java `MediaPlayer` 没有这些方法；原生选轨/字幕只通过演示 `MsHwPlayerActivity` 的 JNI 暴露。需新增 JNI + TrackInfo/TimedText 封装，工作量较大，本轮未做 |
+| `MediaPlayer` 1:1：`getTrackInfo`/`selectTrack`/`deselectTrack`/`addTimedTextSource`/`OnTimedTextListener`/`OnSubtitleDataListener` | **已修（2026-11-24 阶段 7）** | 已加 `getTrackInfo`/`selectTrack`/`deselectTrack`/`getSelectedTrack`/`addTimedTextSource`/`OnTimedTextListener` 与 `TrackInfo`/`TimedText`，复用内核 `pj_select_track`/`pj_cues_now_locked`/`pj_load_ext_sub`（与演示 Activity 同一路径）。仍未做：`OnSubtitleDataListener`、位图字幕回调、多个外挂文件、`TrackInfo` Parcelable |
 | `MediaPlayer` 1:1：`setNextMediaPlayer`/`getAudioSessionId`/`attachAuxEffect`/DRM/`MediaDataSource` | B（刻意不做） | 盒子直播点播场景不用；调用方需注意 |
 | 单连接探测（一次连接内完成探测与播放，不二次拉取） | A | `ms_ff` 自定义 io_open + FFmpeg 探测复用同一 AVIO；HLS Keep-Alive 统计 `conn_open=1 conn_reuse=4`（5 片） |
 | 不看扩展名 + 伪装头剥离（PNG/JPEG 头包 TS/MP4/FLV/MKV，HLS 切片伪装 .png/.jpg） | A | 宿主 `hls_png_seg`/`hls_fmp4_jpg`/`png_mkv`/`png_ts` 通过；API 18/34 原生单测 png_mkv、hls_png 通过；预下载路径同样经过剥离（预下载只缓存原始字节，剥离仍在 demux 前统一做） |

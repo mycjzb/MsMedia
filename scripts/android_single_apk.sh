@@ -6,9 +6,9 @@
 #   MsSpeed-<variant>-debug.apk   ：armeabi-v7a + arm64-v8a + x86_64 (+x86 若有)，模拟器/真机通用
 #   MsSpeed-<variant>-release-arm.apk：仅 v7a + v8a（交付用 ABI），同样是 debug 签名
 # 另把 v7a / v8a 单 so 复制到同目录 lib/<abi>/ 便于交付。
-# 包名：com.msmedia.single.pure / com.msmedia.single.slimff（可同时安装对比）。
+# 包名：com.mycjzb.media.single.pure / com.mycjzb.media.single.slimff（可同时安装对比）。
 # 自动化示例：
-#   adb shell am start -n com.msmedia.single.slimff/com.msmedia.demo.MsSpeedDemoActivity \
+#   adb shell am start -n com.mycjzb.media.single.slimff/com.mycjzb.media.player.demo.MsSpeedDemoActivity \
 #     --es auto bench --es players sys,ms --ei repeat 3 --es urls 'h264_aac.ts|h264_aac.mp4'
 #   adb shell am start -n ... --es http 'http://10.0.2.2:8080/x|https://example.com/'
 # by: Long <mycjzb@gmail.com>
@@ -18,8 +18,8 @@ SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/home/box/.local/android-sdk}}"
 JDK="${JAVA_HOME:-/home/box/.local/jdk}"
 VARIANT="${VARIANT:-slimff}"
 case "$VARIANT" in
-  pure)   SUB="${SINGLE_SUB:-single-native-s2}"; PKG=com.msmedia.single.pure;   LABEL="MsSpeed-A纯自研" ;;
-  slimff) SUB="${SINGLE_SUB:-single-slimff}";    PKG=com.msmedia.single.slimff; LABEL="MsSpeed-B精简FF" ;;
+  pure)   SUB="${SINGLE_SUB:-single-native-s2}"; PKG=com.mycjzb.media.single.pure;   LABEL="MsSpeed-A纯自研" ;;
+  slimff) SUB="${SINGLE_SUB:-single-slimff}";    PKG=com.mycjzb.media.single.slimff; LABEL="MsSpeed-B精简FF" ;;
   *) echo "error: VARIANT=pure|slimff" >&2; exit 2 ;;
 esac
 # APK_OUT：阶段 4 起输出到新目录（如 build/single-apk-s4），不覆盖历史 single-apk-s3。
@@ -49,10 +49,10 @@ sed -e "s/@PKG@/$PKG/" -e "s/@LABEL@/$LABEL/" "$ROOT/android/single/AndroidManif
 "$BT/aapt2" compile --dir "$ROOT/android/single/res" -o "$OUT/work/res.zip"
 "$BT/aapt2" link -o "$OUT/work/base.apk" --manifest "$OUT/work/AndroidManifest.xml" -I "$ANDROID_JAR" \
   --java "$OUT/work/gen" "$OUT/work/res.zip"
-J="$ROOT/android/hw/java/com/msmedia"
+J="$ROOT/android/hw/java/com/mycjzb/media/player"
 "$JDK/bin/javac" --release 11 -nowarn -encoding UTF-8 -cp "$ANDROID_JAR" -d "$OUT/work/classes" \
-  "$J/MediaPlayer.java" "$J/MsNativeLoader.java" "$J/MsSystemTls.java" "$J/net/MsHttpClient.java" \
-  "$ROOT/android/single/java/com/msmedia/demo/MsSpeedDemoActivity.java" 2>&1 | grep -v "bootstrap classpath\|^1 warning\|^warning: \[options\]" || true
+  "$J/MediaPlayer.java" "$J/TimedText.java" "$J/MsNativeLoader.java" "$J/MsSystemTls.java" "$J/MsHttpClient.java" \
+  "$ROOT/android/single/java/com/mycjzb/media/player/demo/MsSpeedDemoActivity.java" "$ROOT/android/single/java/com/mycjzb/media/player/demo/MsTrackSelfTest.java" 2>&1 | grep -v "bootstrap classpath\|^1 warning\|^warning: \[options\]" || true
 python3 "$ROOT/scripts/strip_method_params.py" "$OUT/work/classes"
 # 以 jar 喂 d8（逐个 .class 传入时 d8 8.2 对 MediaPlayer$1 报内部 NPE）。
 (cd "$OUT/work/classes" && "$JDK/bin/jar" cf "$OUT/work/classes.jar" .)

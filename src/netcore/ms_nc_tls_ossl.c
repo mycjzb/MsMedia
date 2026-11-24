@@ -2,7 +2,7 @@
  * 公共网络层 TLS 泵 —— OpenSSL 3.5.9 极致裁剪版后端（路线 B 主力单 so，编译宏 MS_NC_TLS_OPENSSL）。
  *
  * 一份实现两种策略（用户明确要求「只有播放忽略，API 不忽略」）：
- *   - 严格（verify=1）：com.msmedia.net.MsHttpClient / ms_nc_conn_open 默认，且不可关闭。
+ *   - 严格（verify=1）：com.mycjzb.media.player.MsHttpClient / ms_nc_conn_open 默认，且不可关闭。
  *       证书链按系统 CA 信任库校验（Android：/apex/com.android.conscrypt/cacerts 或
  *       /system/etc/security/cacerts；宿主：/etc/ssl/certs/ca-certificates.crt），
  *       另可经 ms_nc_tls_set_extra_ca() 追加信任（测试 CA / 企业 CA），主机名（含 IP 字面量）必须匹配。

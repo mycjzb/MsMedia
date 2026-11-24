@@ -1,5 +1,5 @@
 /*
- * 安卓系统 TLS：经 JNI 调用 com.msmedia.MsSystemTls（SSLEngine）。
+ * 安卓系统 TLS：经 JNI 调用 com.mycjzb.media.player.MsSystemTls（SSLEngine）。
  * 默认 TrustManager 使用系统 CA；主机名用 HTTPS 算法或 HostnameVerifier 校验。
  * 不提供关闭校验的接口。非 Android 或无 JVM 时打开失败。
  * by: Long <mycjzb@gmail.com>
@@ -59,7 +59,7 @@ int ms_android_tls_open(void **out, const char *hostname)
     if (ms_nc_jni_tls_class() != NULL) {
         cl = (jclass)(*env)->NewLocalRef(env, ms_nc_jni_tls_class());
     } else {
-        cl = (*env)->FindClass(env, "com/msmedia/MsSystemTls");
+        cl = (*env)->FindClass(env, "com/mycjzb/media/player/MsSystemTls");
     }
     if (cl == NULL) {
         (*env)->ExceptionClear(env);

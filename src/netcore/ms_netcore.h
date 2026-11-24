@@ -2,7 +2,7 @@
  * 公共可控网络层（单 so 内只此一份）：自研 TCP 拨号 + 自定义 DNS 钩子 + SOCKS5 代理 +
  * HTTP/1.1 客户端；HTTPS 只在已连好的 socket 上叠加安卓系统 TLS（JNI SSLEngine），
  * 证书链与主机名校验不可关闭，0 字节 OpenSSL。
- * 复用方：FFmpeg tcp/tls 协议覆盖（播放器）、com.msmedia.net.MsHttpClient（App 业务）。
+ * 复用方：FFmpeg tcp/tls 协议覆盖（播放器）、com.mycjzb.media.player.MsHttpClient（App 业务）。
  * 不记录完整 URL（可能含私有 token）。
  * by: Long <mycjzb@gmail.com>
  */

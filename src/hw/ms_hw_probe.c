@@ -62,7 +62,7 @@ static void probe_text(char *dst, size_t cap, ANativeWindow *win)
 
 #if 1
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_MsHwSmokeActivity_nativeProbe(JNIEnv *env, jobject thiz,
+Java_com_mycjzb_media_player_MsHwSmokeActivity_nativeProbe(JNIEnv *env, jobject thiz,
                                                jobject surface)
 {
     char buf[512];

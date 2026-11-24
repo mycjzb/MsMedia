@@ -3,7 +3,7 @@
  * 无关闭校验的开关。供 libmsplayer.so 的 FFmpeg tls 后端通过 JNI 调用。
  * by: Long <mycjzb@gmail.com>
  */
-package com.msmedia;
+package com.mycjzb.media.player;
 
 import java.nio.ByteBuffer;
 import java.security.cert.Certificate;

@@ -7,7 +7,7 @@
 # 不改 scripts/android_hw_build.sh、不写 build/android-hw、不碰冻结目录；不用 UPX。
 # 阶段 2：
 #   - 两条路线都并入同一份自研网络层 src/netcore（TCP/HTTP/DNS 钩子/SOCKS5 + 安卓系统 TLS JNI 泵），
-#     供 com.msmedia.net.MsHttpClient 与播放器共用；0 字节 OpenSSL。
+#     供 com.mycjzb.media.player.MsHttpClient 与播放器共用；0 字节 OpenSSL。
 #   - MODE=pure   -> build/android-*/single-native-s2/（阶段 1 的 single-native/ 冻结，不覆盖）
 #   - MODE=slimff -> build/android-*/single-slimff/：再并入 ms_ff 适配器 + 精简 FFmpeg 9.1 静态库
 #                    （--disable-openssl --enable-androidtls；ff_tcp_protocol/ff_tls_protocol 由

@@ -1,5 +1,5 @@
 /*
- * com.msmedia.net.MsHttpClient 的 JNI：把公共可控网络层（ms_netcore）开放给 App 业务代码。
+ * com.mycjzb.media.player.MsHttpClient 的 JNI：把公共可控网络层（ms_netcore）开放给 App 业务代码。
  * 与播放器共用同一份拨号/DNS/SOCKS5/系统 TLS/HTTP 实现，不另写网络栈。
  * 不记录 URL、请求头和请求体。
  * by: Long <mycjzb@gmail.com>
@@ -42,14 +42,14 @@ static void copy_jstr(JNIEnv *env, jstring s, char *dst, size_t cap)
 }
 
 JNIEXPORT jint JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeInit(JNIEnv *env, jclass cls)
+Java_com_mycjzb_media_player_MsHttpClient_nativeInit(JNIEnv *env, jclass cls)
 {
     (void)cls;
     return ms_nc_jni_init(env);
 }
 
 JNIEXPORT jint JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeConfigure(JNIEnv *env, jclass cls, jstring dnsMap,
+Java_com_mycjzb_media_player_MsHttpClient_nativeConfigure(JNIEnv *env, jclass cls, jstring dnsMap,
                                                   jboolean javaDns, jstring socksHost,
                                                   jint socksPort, jstring user, jstring pass,
                                                   jboolean remoteDns)
@@ -71,7 +71,7 @@ Java_com_msmedia_net_MsHttpClient_nativeConfigure(JNIEnv *env, jclass cls, jstri
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeCreate(JNIEnv *env, jclass cls)
+Java_com_mycjzb_media_player_MsHttpClient_nativeCreate(JNIEnv *env, jclass cls)
 {
     (void)env;
     (void)cls;
@@ -79,7 +79,7 @@ Java_com_msmedia_net_MsHttpClient_nativeCreate(JNIEnv *env, jclass cls)
 }
 
 JNIEXPORT jint JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeExecute(JNIEnv *env, jclass cls, jlong handle,
+Java_com_mycjzb_media_player_MsHttpClient_nativeExecute(JNIEnv *env, jclass cls, jlong handle,
                                                 jstring method, jstring url, jstring headers,
                                                 jbyteArray body, jint connectMs, jint readMs,
                                                 jint maxRedirects)
@@ -130,7 +130,7 @@ Java_com_msmedia_net_MsHttpClient_nativeExecute(JNIEnv *env, jclass cls, jlong h
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeHeaders(JNIEnv *env, jclass cls, jlong handle)
+Java_com_mycjzb_media_player_MsHttpClient_nativeHeaders(JNIEnv *env, jclass cls, jlong handle)
 {
     nc_call *c = (nc_call *)(intptr_t)handle;
     (void)cls;
@@ -138,7 +138,7 @@ Java_com_msmedia_net_MsHttpClient_nativeHeaders(JNIEnv *env, jclass cls, jlong h
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeContentLength(JNIEnv *env, jclass cls, jlong handle)
+Java_com_mycjzb_media_player_MsHttpClient_nativeContentLength(JNIEnv *env, jclass cls, jlong handle)
 {
     nc_call *c = (nc_call *)(intptr_t)handle;
     (void)env;
@@ -147,7 +147,7 @@ Java_com_msmedia_net_MsHttpClient_nativeContentLength(JNIEnv *env, jclass cls, j
 }
 
 JNIEXPORT jint JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeRead(JNIEnv *env, jclass cls, jlong handle,
+Java_com_mycjzb_media_player_MsHttpClient_nativeRead(JNIEnv *env, jclass cls, jlong handle,
                                              jbyteArray buf, jint off, jint len)
 {
     nc_call *c = (nc_call *)(intptr_t)handle;
@@ -178,7 +178,7 @@ Java_com_msmedia_net_MsHttpClient_nativeRead(JNIEnv *env, jclass cls, jlong hand
 
 /* 任意线程可调：只置标志，正在进行的拨号/读写 <=100ms 内返回 Canceled。 */
 JNIEXPORT void JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeCancel(JNIEnv *env, jclass cls, jlong handle)
+Java_com_mycjzb_media_player_MsHttpClient_nativeCancel(JNIEnv *env, jclass cls, jlong handle)
 {
     nc_call *c = (nc_call *)(intptr_t)handle;
     (void)env;
@@ -188,7 +188,7 @@ Java_com_msmedia_net_MsHttpClient_nativeCancel(JNIEnv *env, jclass cls, jlong ha
 
 /* 只能在没有并发 execute/read 时调用（Java 侧加锁保证）。 */
 JNIEXPORT void JNICALL
-Java_com_msmedia_net_MsHttpClient_nativeRelease(JNIEnv *env, jclass cls, jlong handle)
+Java_com_mycjzb_media_player_MsHttpClient_nativeRelease(JNIEnv *env, jclass cls, jlong handle)
 {
     nc_call *c = (nc_call *)(intptr_t)handle;
     (void)env;

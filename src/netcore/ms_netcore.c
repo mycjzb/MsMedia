@@ -1380,7 +1380,7 @@ int ms_nc_jni_init(JNIEnv *env)
     if (env == NULL) return -1;
     pthread_mutex_lock(&g_mu);
     if (g_tls_cls == NULL) {
-        c = (*env)->FindClass(env, "com/msmedia/MsSystemTls");
+        c = (*env)->FindClass(env, "com/mycjzb/media/player/MsSystemTls");
         if (c) {
             g_tls_cls = (jclass)(*env)->NewGlobalRef(env, c);
             (*env)->DeleteLocalRef(env, c);
@@ -1389,7 +1389,7 @@ int ms_nc_jni_init(JNIEnv *env)
         }
     }
     if (g_net_cls == NULL) {
-        c = (*env)->FindClass(env, "com/msmedia/net/MsHttpClient");
+        c = (*env)->FindClass(env, "com/mycjzb/media/player/MsHttpClient");
         if (c) {
             g_net_cls = (jclass)(*env)->NewGlobalRef(env, c);
             g_resolve_mid = (*env)->GetStaticMethodID(env, g_net_cls, "dnsResolveFromNative",

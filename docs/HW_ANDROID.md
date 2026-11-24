@@ -72,7 +72,7 @@ NDK `AMediaCodecStore` / `AMediaCodecInfo` 为 API 36 引入，本路径面向 A
 | `build/android-hw/mshw_probe` | 9,536 | 无 JVM 探测可执行文件；不得单独声称硬解 |
 | `build/android-hw/MsHwSmoke.apk` | 33,243 | minSdk 21，含上述 so；已 apksigner 校验，未安装 |
 
-动态导出含全部 `ms_hw_*` 公共符号以及 `JNI_OnLoad` / `Java_com_msmedia_MsHwSmokeActivity_nativeProbe`（`MSMEDIA_HW_1.0`）。
+动态导出含全部 `ms_hw_*` 公共符号以及 `JNI_OnLoad` / `Java_com_mycjzb_media_player_MsHwSmokeActivity_nativeProbe`（`MSMEDIA_HW_1.0`）。
 
 ## 7. 阻塞与未验证项（不得写成已通过）
 

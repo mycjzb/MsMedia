@@ -2168,7 +2168,7 @@ Android 双 ABI 前缀与 `android-hw` 的 `libmsff` 已含 `ff_matroska_demuxer
 ### 已落地的修复（源码已在树内，官方 test 已过）
 
 - FORTIFY / CodecLooper：根因是 `AMediaCodec_stop` 后再 `delete`，looper 在已销毁互斥量上加锁。最终关闭顺序为：`closing=1` → 摘 OnFrameRendered 回调 → 若已 start 则 `flush` 归还 buffer → **只** `AMediaCodec_delete`（内部 release+join）→ 指针置空。音频路径同样不单独 stop，先 pause AudioTrack 再 flush+delete。`mshw_frame_dump` 在 c2.android.avc.decoder 上 `DUMP_EXIT=0` 且日志无 FORTIFY（`build/avd-accept-20261123/dump/run-final-c2_android_avc_decoder.log`）。goldfish dump 一次 180s 超时未写出日志，待补。
-- 测试 Activity：`com.msmedia.DEBUG_CMD` 广播（seek/next_audio/next_sub/sub_off/pause/resume/stats/pos），`singleTop` + `configChanges`。
+- 测试 Activity：`com.mycjzb.media.player.DEBUG_CMD` 广播（seek/next_audio/next_sub/sub_off/pause/resume/stats/pos），`singleTop` + `configChanges`。
 - 累加字段：`audio_track` write_frames/write_bytes/head_frames，`av_sync` video_pts 与 audio_clock 差。
 - x86_64 `ass_deps` 原先误用 aarch64 工具链，已在 `scripts/ass_deps_android_build.sh` 补 `x86_64-linux-android` 映射；测试 APK 含 libmsass。
 
@@ -2673,7 +2673,7 @@ seek / next_audio / next_sub / sub_off / pause / resume 的 adb 广播 + 截图�
 - 脚本：`/tmp/vod-diag/https_range_proxy.py`，监听 `127.0.0.1:8443`，叶证书为已有自签方案 `build/avd-accept-20261123/certs/server.crt`（SAN IP 127.0.0.1 / DNS localhost），对源站走系统 CA 且校验开启。
 - 宿主 curl Range `bytes=0-15` 与 moov 头 `bytes=1694396455-1694396486` 均为 HTTP 206，总长 1699383887。
 - 宿主同一 libmsff 经代理打开 `https://127.0.0.1:8443/vod.mp4` + 测试 CA：`open=OK` wall ≈ 7.465 s。
-- `adb -s emulator-5554 reverse tcp:8443 tcp:8443` 已建立。测试 CA 已追加到 `/data/data/com.msmedia/cache/ms_system_cas.pem`（136 张，未关校验）。
+- `adb -s emulator-5554 reverse tcp:8443 tcp:8443` 已建立。测试 CA 已追加到 `/data/data/com.mycjzb.media.player/cache/ms_system_cas.pem`（136 张，未关校验）。
 - 证据：`build/avd-accept-20261123/user-vod/10-host-vs-avd-diag.txt`。
 - 下一步：在 CJZB_API34 上播该代理 URL，测首帧、60s、seek 30 分/1:50、暂停恢复、前后台。该段为**经本机代理**，不是 AVD 直连公网。
 
@@ -3078,7 +3078,7 @@ HEAD 仍 `1092bec`，未 commit/push。冻结产物未写：`build/ffmpeg-9.1-si
 
 对照用户「单架构合并成一个 2 MB 以内的 so、自研与精简 FFmpeg 两条线对比、播放不出错 / 不泄漏 / 不闪退」，以及随后补充的统一产物名 `libmsplayer.so`、清掉用不到的算法、Java 层按系统 `android.media.MediaPlayer` 封装。本轮只做阶段 1（盘点 + 解剖 + 路线 A 原型 + 路线 B 精确预算 + API 差距与骨架），**不是**真机验收，也尚未产出路线 B 精简 FFmpeg 单 so。
 
-红线：未删除或修改任何 `/workspace/MsMedia-deliver-*`；未改写冻结产物（`build/release/libmsmedia.so.1.0.0`、`build/ffmpeg-9.1-size`、`build/android-v7a/size`、`build/android-v8a/size`、`build/release-size`）。对照开跑前的 986 个冻结/交付文件 SHA-256，结束时 **986 全部一致、0 缺失**。HEAD 仍为 `1092bec`，未 commit / push。未使用 UPX，未关闭或弱化 TLS 校验，未启用 GPL/nonfree，FFmpeg 仍 `CONFIG_DECODERS=0`。稳定 C ABI v1 未改（官方 test 金丝雀 `sizeof(ms_event)=176`）。现有多 so 构建脚本 `scripts/android_hw_build.sh` 与官方测试未改行为。新产物只写在 `build/android-v7a/single-native/`、`build/android-v8a/single-native/`、`build/single-analysis/`，以及新增源码 `scripts/android_single_build.sh`、`src/single/libmssingle.map`、`android/hw/java/com/msmedia/MediaPlayer.java`、`docs/MEDIAPLAYER_API.md`。日志与本文不写完整私有流 URL。
+红线：未删除或修改任何 `/workspace/MsMedia-deliver-*`；未改写冻结产物（`build/release/libmsmedia.so.1.0.0`、`build/ffmpeg-9.1-size`、`build/android-v7a/size`、`build/android-v8a/size`、`build/release-size`）。对照开跑前的 986 个冻结/交付文件 SHA-256，结束时 **986 全部一致、0 缺失**。HEAD 仍为 `1092bec`，未 commit / push。未使用 UPX，未关闭或弱化 TLS 校验，未启用 GPL/nonfree，FFmpeg 仍 `CONFIG_DECODERS=0`。稳定 C ABI v1 未改（官方 test 金丝雀 `sizeof(ms_event)=176`）。现有多 so 构建脚本 `scripts/android_hw_build.sh` 与官方测试未改行为。新产物只写在 `build/android-v7a/single-native/`、`build/android-v8a/single-native/`、`build/single-analysis/`，以及新增源码 `scripts/android_single_build.sh`、`src/single/libmssingle.map`、`android/hw/java/com/mycjzb/media/player/MediaPlayer.java`、`docs/MEDIAPLAYER_API.md`。日志与本文不写完整私有流 URL。
 
 ### 1. 纯自研核心（不依赖 `libmsff.so` / `libmsass.so`）实际能力
 
@@ -3172,7 +3172,7 @@ v7a morefmt 前 20 个最大输入 `.o`（链接器合成段合计 622,333 另�
 
 ### 3. 路线 A：纯自研单 `libmsplayer.so`（v7a + v8a）
 
-新增 `scripts/android_single_build.sh`（默认 `MODE=pure`），把与官方脚本相同的核心源 + 硬件/JNI 源合并编译为一个 so，**不链** `libmsff` / `libmsass` / OpenSSL。SONAME / 交付文件名统一为 **`libmsplayer.so`**。`--gc-sections` + ICF + hidden + 仅导出 `JNI_OnLoad` / `Java_com_msmedia_*`。
+新增 `scripts/android_single_build.sh`（默认 `MODE=pure`），把与官方脚本相同的核心源 + 硬件/JNI 源合并编译为一个 so，**不链** `libmsff` / `libmsass` / OpenSSL。SONAME / 交付文件名统一为 **`libmsplayer.so`**。`--gc-sections` + ICF + hidden + 仅导出 `JNI_OnLoad` / `Java_com_mycjzb_media_player_*`。
 
 链接 map 核对后，下列模块在当前 JNI 调用图上被整份 GC（不占交付体积）：`ms_dash.c`、`ms_hls.c`、`ms_hw_vaapi.c`（Linux VAAPI）、`ms_source.c`（JNI 尚未走 Source）。仍编译进对象，便于阶段 2 接通 MediaPlayer / 文件随机读时再被引用；未引用则不会进入 so。
 
@@ -3195,16 +3195,16 @@ v7a morefmt 前 20 个最大输入 `.o`（链接器合成段合计 622,333 另�
 
 ### 4. Java 标准 MediaPlayer 封装（阶段 1 骨架）
 
-详见 `docs/MEDIAPLAYER_API.md`。类名建议并已落地：**`com.msmedia.MediaPlayer`**（与系统类同名不同包，业务改 import 即可切换）。
+详见 `docs/MEDIAPLAYER_API.md`。类名建议并已落地：**`com.mycjzb.media.player.MediaPlayer`**（与系统类同名不同包，业务改 import 即可切换）。
 
 现有 Demo 差距（要点）：多 so `loadLibrary`（`msmedia`/`msff`/`msass`/`msai`/`mshw`）对系统播放器无对应物；`nativePlayPath`/`nativeOpenUrl` 没有 prepare 阶段；时间单位是 90 kHz 且 `nativePosition` 返回字符串；无 `setVolume` / `setLooping` / 标准 listener；速率是私有 `setRate(num,den)` 而不是 `setPlaybackParams`。
 
-骨架 `android/hw/java/com/msmedia/MediaPlayer.java` 已按系统合同写出常用公开 API、常量值、七个指定 listener 与状态机，只加载 **`libmsplayer.so`**。用 android-34 / `--release 11` 单独编译到 `build/single-analysis/mediaplayer-classes/`，**未**加入 `scripts/android_hw_build.sh`，不改变现行 APK。`prepare` 在原生未接线时诚实失败（`IOException` / `OnErrorListener`），不假装已出画。阶段 2 再为 `Java_com_msmedia_MediaPlayer_*` 加薄 JNI，90 kHz↔毫秒转换留在 so 内，不改 C ABI v1。字幕/AI 等私有能力不放进标准类方法名。
+骨架 `android/hw/java/com/mycjzb/media/player/MediaPlayer.java` 已按系统合同写出常用公开 API、常量值、七个指定 listener 与状态机，只加载 **`libmsplayer.so`**。用 android-34 / `--release 11` 单独编译到 `build/single-analysis/mediaplayer-classes/`，**未**加入 `scripts/android_hw_build.sh`，不改变现行 APK。`prepare` 在原生未接线时诚实失败（`IOException` / `OnErrorListener`），不假装已出画。阶段 2 再为 `Java_com_mycjzb_media_player_MediaPlayer_*` 加薄 JNI，90 kHz↔毫秒转换留在 so 内，不改 C ABI v1。字幕/AI 等私有能力不放进标准类方法名。
 
 ### 5. 阶段 2 预告（本轮不做）
 
 - 落地路线 B：新目录重配无静态 OpenSSL 的 FFmpeg，合并为 `build/android-*/single-slimff/libmsplayer.so`，用 map 对账压进 2 MB。
-- 把 `com.msmedia.MediaPlayer` 接到 `libmsplayer.so`；需要时再打单 so 演示 APK（仍不覆盖历史交付包）。
+- 把 `com.mycjzb.media.player.MediaPlayer` 接到 `libmsplayer.so`；需要时再打单 so 演示 APK（仍不覆盖历史交付包）。
 - 两条线用同一组样本对比体积、格式覆盖、起播/播控/seek、泄漏与稳定性。
 
 ## 2026-11-24 10:55 Asia/Shanghai — 阶段 2：路线 B 单 so（single-slimff）、MediaPlayer 接线、双线对比、起播耗时拆分
@@ -3220,7 +3220,7 @@ v7a morefmt 前 20 个最大输入 `.o`（链接器合成段合计 622,333 另�
 | `build/android-v7a/single-native-s2/libmsplayer.so` | 209,856 | 7dcf3123bcb566f5… | android, log, m, dl, c |
 | `build/android-v8a/single-native-s2/libmsplayer.so` | 278,608 | ceb9a181c1b85264ee8d48fc80a421110e28c0c173e31673a17370b4b66dde02 | 同上 |
 
-四个 so 都只导出 59 个符号：`JNI_OnLoad` 和 `Java_com_msmedia_*`，版本 `MSMEDIA_SINGLE_1.0`。用户已放宽到“多几百 KB 没关系”，所以超出 2 MiB 只记录不阻断（`STRICT_LIMIT=1` 才会失败）。
+四个 so 都只导出 59 个符号：`JNI_OnLoad` 和 `Java_com_mycjzb_media_player_*`，版本 `MSMEDIA_SINGLE_1.0`。用户已放宽到“多几百 KB 没关系”，所以超出 2 MiB 只记录不阻断（`STRICT_LIMIT=1` 才会失败）。
 
 v8a 逐项体积：
 
@@ -3240,7 +3240,7 @@ LATM 评估：自研 LOAS→raw AAC 解包后交给系统 MediaCodec，约可省
 
 ### 2. MediaPlayer 接线
 
-- `com.msmedia.MediaPlayer` 与系统 API、常量、7 个 listener 对齐，同一份 Java 可加载任一 so（`isFfmpegRoute()` 可查）。
+- `com.mycjzb.media.player.MediaPlayer` 与系统 API、常量、7 个 listener 对齐，同一份 Java 可加载任一 so（`isFfmpegRoute()` 可查）。
 - 时间单位全部是毫秒，90 kHz 不出 so。
 - `prepare` 对本构建播不了的输入诚实失败（-1010/-1004/-110）。
 - 非标准诊断接口：`getStartupTimingsUs()`，取自 `nativeStartupStats`，以 request 为零点，单位 µs。
@@ -3314,7 +3314,7 @@ LATM 评估：自研 LOAS→raw AAC 解包后交给系统 MediaCodec，约可省
 | slimff | x86 | 2,051,836 | 230917940dbdda3aa3d9bc51a3dbc15a5dacb2bd81fdfd3f776e72ba59ba243b | 同上 | 62 |
 | slimff | x86_64 | 2,039,240 | a3a045c0a8902bc727c8a6a58b67acc2468a882c5007c85d21cc6dbb272762ba | 同上 | 62 |
 
-导出符号：只有 `JNI_OnLoad` 和 `Java_com_msmedia_*`，版本节点为 `MSMEDIA_SINGLE_1.0`，内部 C 符号全部隐藏。本阶段新增 3 个导出：
+导出符号：只有 `JNI_OnLoad` 和 `Java_com_mycjzb_media_player_*`，版本节点为 `MSMEDIA_SINGLE_1.0`，内部 C 符号全部隐藏。本阶段新增 3 个导出：
 
 - `MediaPlayer.nativeSetPreload`
 - `MediaPlayer.nativeSetAudioPassthrough`
@@ -3329,7 +3329,7 @@ LATM 评估：自研 LOAS→raw AAC 解包后交给系统 MediaCodec，约可省
 | MsSpeed-slimff-release-arm.apk | 3,908,137 |
 | MsSpeed-slimff-debug.apk | 8,000,180 |
 
-包名分别为 `com.msmedia.single.pure` 和 `com.msmedia.single.slimff`，可以同机安装做对比。
+包名分别为 `com.mycjzb.media.single.pure` 和 `com.mycjzb.media.single.slimff`，可以同机安装做对比。
 
 ### 2. 体积与裁剪对照
 
@@ -3460,8 +3460,8 @@ Java/JNI 新增 API：
 ### 6. 接入替换
 
 1. 把 `pure/lib/<abi>/libmsplayer.so` 或 `slimff/lib/<abi>/libmsplayer.so` 放进 `jniLibs`，两者二选一。
-2. 加入 `com.msmedia.MediaPlayer` 和 `MsNativeLoader`、`MsSystemTls`、`net/MsHttpClient` 这几个 Java 文件。
-3. 把 `android.media.MediaPlayer` 换成 `com.msmedia.MediaPlayer`，接口与系统版一致。
+2. 加入 `com.mycjzb.media.player.MediaPlayer` 和 `MsNativeLoader`、`MsSystemTls`、`net/MsHttpClient` 这几个 Java 文件。
+3. 把 `android.media.MediaPlayer` 换成 `com.mycjzb.media.player.MediaPlayer`，接口与系统版一致。
 4. 可选扩展：`setPreloadConfig(10000, 16<<20)`、`setAudioPassthroughEnabled(true)`，都在下一次 prepare 时生效。
 
 ### 7. 真机待验清单（本机无法验证）
@@ -3508,3 +3508,13 @@ NEEDED：libandroid/libc/libdl/liblog/libm/libz；导出 64（s5 的 62 + `nativ
 - CJZB_API18：原生单测（x86，同一批对象）16/16 符合预期，含严格校验访问 google.com 200、自签拦截、AES、取消 33 ms；APK 生命周期 prepare 全部成功、无崩溃，首帧超时与 s4 相同（模拟器 4.3 无解码输出，需真机）。
 
 **未做 / 限制**：Java MediaPlayer 未开放 getTrackInfo/selectTrack/TimedText；SAMPLE-AES/DRM 不支持；字节上限可被在途一片超出；真机项见 `docs/DESIGN_AUDIT.md` 第 6 节。
+
+## 阶段 7（2026-11-24）：MediaPlayer 选轨/字幕接口 + 包名改为 com.mycjzb.media.player
+
+by: Long <mycjzb@gmail.com>
+
+- 新接口（与 android.media.MediaPlayer 同签名同语义）：`getTrackInfo()` + `MediaPlayer.TrackInfo`、`selectTrack`、`deselectTrack`、`getSelectedTrack`、`addTimedTextSource`（4 个重载，SRT；扩展 VTT/SSA）、`setOnTimedTextListener` + `TimedText`。状态不对抛 `IllegalStateException`，回调在主线程。
+- 复用内核：抽出 `pj_select_track` / `pj_cues_now_locked` / `pj_load_ext_sub`，演示 Activity 与 MediaPlayer 走同一路径；新增 6 个 JNI 导出（s6 校验期望 68 个导出）。
+- 包名统一为 `com.mycjzb.media.player`（`MsHttpClient` 从 `net` 子包移入），JNI 符号、FindClass、版本脚本、校验脚本、演示 App、混淆规则（新增 `android/hw/consumer-rules.pro`）、文档同步。
+- 测试：`build.sh test` 通过；`single_s6_verify.sh` 377 PASS / 0 FAIL；API34 模拟器 3 轮自测 67 PASS / 8 FAIL（失败集中在模拟器卡顿导致的时序：第 1 轮 prepare 后轨道表暂空、内嵌字幕时间窗内没播到、取消字幕后 1.5 s 内未见 null 回调；第 3 轮全过）。API18、ASan 本轮未复跑。
+- 体积（s6 oz-flto，字节）：v7a 2797212（+2968）、v8a 3151224（+3088）、x86 3209312（+3544）、x86_64 3412552（+3088）。

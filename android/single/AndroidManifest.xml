@@ -12,7 +12,7 @@
         android:label="@LABEL@"
         android:debuggable="true"
         android:usesCleartextTraffic="true">
-        <activity android:name="com.msmedia.demo.MsSpeedDemoActivity"
+        <activity android:name="com.mycjzb.media.player.demo.MsSpeedDemoActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation"

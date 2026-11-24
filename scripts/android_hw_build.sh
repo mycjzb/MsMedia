@@ -519,8 +519,8 @@ fi
   "$APK_DIR/res.zip"
 "$JDK/bin/javac" --release 11 -cp "$ANDROID_JAR" \
   -d "$APK_DIR/classes" \
-  "$ROOT/android/hw/java/com/msmedia/MsHwSmokeActivity.java" \
-  "$ROOT/android/hw/java/com/msmedia/MsHwPlayerActivity.java"
+  "$ROOT/android/hw/java/com/mycjzb/media/player/MsHwSmokeActivity.java" \
+  "$ROOT/android/hw/java/com/mycjzb/media/player/MsHwPlayerActivity.java"
 # 含匿名/内部类（如 Player$1），不能只喂两个顶层 .class
 mapfile -t DEX_CLASSES < <(find "$APK_DIR/classes" -name '*.class' | sort)
 "$D8" --lib "$ANDROID_JAR" --min-api 18 \

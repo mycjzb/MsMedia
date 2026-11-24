@@ -3,7 +3,7 @@
  * 并在 Java 线程上缓存原生工作线程需要的应用类（系统 TLS / DNS 回调）。只加载一次。
  * by: Long <mycjzb@gmail.com>
  */
-package com.msmedia;
+package com.mycjzb.media.player;
 
 public final class MsNativeLoader {
     private static boolean tried;
@@ -26,7 +26,7 @@ public final class MsNativeLoader {
         }
         try {
             // 触发 MsHttpClient 类初始化并缓存 MsSystemTls / DNS 回调类；失败不影响本地播放。
-            com.msmedia.net.MsHttpClient.initFromLoader();
+            com.mycjzb.media.player.MsHttpClient.initFromLoader();
         } catch (Throwable ignored) {
         }
         return loaded;

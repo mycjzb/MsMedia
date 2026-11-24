@@ -1,4 +1,4 @@
-# com.msmedia.MediaPlayer 封装设计（阶段 1）
+# com.mycjzb.media.player.MediaPlayer 封装设计（阶段 1）
 
 by: Long <mycjzb@gmail.com>
 
@@ -15,14 +15,14 @@ import android.media.MediaPlayer;
 换成
 
 ```java
-import com.msmedia.MediaPlayer;
+import com.mycjzb.media.player.MediaPlayer;
 ```
 
 即可在系统播放器与自研播放器之间切换：类名、常用方法签名、参数、常量值、监听器与系统 `android.media.MediaPlayer` 对齐，不另起私有参数名（例如对外不用 `setRate(int num, int den)`，而用 `setPlaybackParams(PlaybackParams)`）。
 
 底层**只** `System.loadLibrary("msplayer")`，对应统一交付文件 `libmsplayer.so`。自研线产物在 `build/android-v7a/single-native/libmsplayer.so`（及 v8a 对称目录），精简 FFmpeg 线预留 `build/android-v7a/single-slimff/libmsplayer.so`。Java 封装共用，不按路线分两套类。
 
-建议包名 / 类名：**`com.msmedia.MediaPlayer`**（与系统类同名、不同包）。不放在 `android.media` 下，以免与框架类冲突。
+建议包名 / 类名：**`com.mycjzb.media.player.MediaPlayer`**（与系统类同名、不同包）。不放在 `android.media` 下，以免与框架类冲突。
 
 ## 2. 现有 Demo / JNI 与系统 API 的差距
 
@@ -43,11 +43,11 @@ import com.msmedia.MediaPlayer;
 | Uri / FD | `Context+Uri`、`FileDescriptor(+offset,length)`、headers | 只有 path 字符串与 URL 字符串（另加 ca 文件与超时，属私有扩展） |
 | 字幕 / 选轨 / AI | 系统有 `addTimedTextSource` 等（能力不同） | 私有 `nativeLoadSubtitle` / `nativeSelectTrack` / ASS / AI，**不**放进阶段 1 的标准类对外合同（避免出现系统没有的方法名）；后续可用兼容方法或独立 `MsExtras` 挂上，以免「换 import 就能编过」被额外方法绑死 |
 
-结论：现有 JNI 能覆盖播放/暂停/seek/设 Surface/速率的**能力**，但**不是**系统 MediaPlayer 的生命周期与类型合同。阶段 2 应在 `libmsplayer.so` 内为 `Java_com_msmedia_MediaPlayer_*` 增加一层薄 JNI（或把现有 player JNI 改成可被该类复用的内部函数），把 90 kHz 与毫秒互转关在 so 内；**不得**为迁就封装去改稳定 C ABI v1（`sizeof(ms_event)==176`）。
+结论：现有 JNI 能覆盖播放/暂停/seek/设 Surface/速率的**能力**，但**不是**系统 MediaPlayer 的生命周期与类型合同。阶段 2 应在 `libmsplayer.so` 内为 `Java_com_mycjzb_media_player_MediaPlayer_*` 增加一层薄 JNI（或把现有 player JNI 改成可被该类复用的内部函数），把 90 kHz 与毫秒互转关在 so 内；**不得**为迁就封装去改稳定 C ABI v1（`sizeof(ms_event)==176`）。
 
 ## 3. 阶段 1 已落地的骨架
 
-路径：`android/hw/java/com/msmedia/MediaPlayer.java`
+路径：`android/hw/java/com/mycjzb/media/player/MediaPlayer.java`
 
 - 已按系统合同声明常用公开 API（见第 4 节）与全部点名的 listener / 常量（数值与 AOSP 一致）。
 - 内部实现系统文档中的状态机：IDLE → INITIALIZED → PREPARING → PREPARED → STARTED / PAUSED / STOPPED / PLAYBACK_COMPLETED，以及 ERROR、release 后的 END。非法调用抛 `IllegalStateException`。
@@ -76,7 +76,7 @@ import com.msmedia.MediaPlayer;
 
 建议随后对齐、但不挡「换 import」：`setAudioStreamType`、`setAudioAttributes`、`setScreenOnWhilePlaying`、`getTrackInfo` / `selectTrack` / `deselectTrack`。`MediaDataSource`（API 23）、`setDataSource(AssetFileDescriptor)`（API 24）可按需补重载。
 
-明确不在标准类上暴露的私有能力：强制解码器名、CA 文件路径、live-edge seek、ASS 画布、AI 字幕供应商。需要时另开 `com.msmedia.MediaPlayerExtras` 或包内可见方法，避免污染系统合同。
+明确不在标准类上暴露的私有能力：强制解码器名、CA 文件路径、live-edge seek、ASS 画布、AI 字幕供应商。需要时另开 `com.mycjzb.media.player.MediaPlayerExtras` 或包内可见方法，避免污染系统合同。
 
 ## 5. 加载方式
 

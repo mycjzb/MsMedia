@@ -113,7 +113,7 @@ MSMEDIA_API ms_status ms_ff_get_buffer_stats(ms_ff *f, ms_ff_buffer_stats *out);
 /*
  * 播放器拉流 TLS 校验策略（用户定调：只有播放忽略，业务 API 不忽略）。
  * 单 so（OpenSSL 后端）默认 0 = 忽略证书链与主机名（兼容自签 / IP 直连 / 过期根证书）；1 = 严格。
- * 与 com.msmedia.net.MsHttpClient 无关（它永远严格）。须在 open 前设置。
+ * 与 com.mycjzb.media.player.MsHttpClient 无关（它永远严格）。须在 open 前设置。
  */
 MSMEDIA_API ms_status ms_ff_set_tls_verify(ms_ff *f, int verify);
 

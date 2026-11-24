@@ -7,9 +7,8 @@
  * 不记录 URL、请求头和请求体。
  * by: Long <mycjzb@gmail.com>
  */
-package com.msmedia.net;
+package com.mycjzb.media.player;
 
-import com.msmedia.MsNativeLoader;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -111,7 +110,7 @@ public final class MsHttpClient {
         initFromLoader();
     }
 
-    /** 设置进程级 DNS / SOCKS5（同时影响 com.msmedia.MediaPlayer 的网络取流）。 */
+    /** 设置进程级 DNS / SOCKS5（同时影响 com.mycjzb.media.player.MediaPlayer 的网络取流）。 */
     public static void configure(NetConfig c) throws IOException {
         requireLib();
         if (c == null) {

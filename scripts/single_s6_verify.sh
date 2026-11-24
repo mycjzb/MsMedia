@@ -4,6 +4,8 @@
 #  - FFmpeg 组件配置：s6 与 s5 的 config_components.h 必须逐字相同（s6 只改 hls.c 行为，不增减组件）；
 #  - OpenSSL：静态合入（NEEDED 无 libssl/libcrypto），so 内含 OpenSSL 3.5.9 版本串，无 mbedTLS 痕迹；
 #  - 导出：s5 的 62 个 + nativeSetBufferConfig + nativeSetTlsVerify = 64；
+#    s5 基线符号按包名迁移（com.msmedia[.net] → com.mycjzb.media.player）换算后再比对；
+#    阶段 7 选轨/字幕再加 nativeGetTracks / nativeSelectTrack / nativeGetCue / nativeAddTimedText = 68；
 #  - 8 个音频软解、常用字幕 demuxer、DASH/HLS、AVS+(cavsvideo parser) 显式断言；冷门格式仍为 0；
 #  - so：NEEDED 仅系统库+libz；动态导出与 s4 交付逐字相同（61 个 Java_ + JNI_OnLoad = 62）；无 RELR；
 #  - so 内仍含关键 AVOption 键名、常用字幕/音频 codec 名与透传 JNI 入口；help 长文本已不在。
@@ -36,8 +38,9 @@ for abi in armeabi-v7a arm64-v8a x86 x86_64; do
   ck "no mbedTLS symbols" "! llvm-nm '$ROOT/build/android-$d/single-slimff-adec-s6/oz-flto/libmsplayer.unstripped.so' | grep -qi mbedtls"
   need=$(llvm-readelf -d "$so" | awk '/NEEDED/{gsub(/[\[\]]/,"",$5);print $5}' | sort | tr '\n' ' ')
   ck "NEEDED system+libz ($need)" "[[ '$need' == 'libandroid.so libc.so libdl.so liblog.so libm.so libz.so ' ]]"
-  ck "exports == s5 + 2 new" "diff -q <( (llvm-nm -D --defined-only '$so5' | awk '{print \$3}'; echo Java_com_msmedia_MediaPlayer_nativeSetBufferConfig@@MSMEDIA_SINGLE_1.0; echo Java_com_msmedia_MediaPlayer_nativeSetTlsVerify@@MSMEDIA_SINGLE_1.0) | sort) <(llvm-nm -D --defined-only '$so' | awk '{print \$3}' | sort) >/dev/null"
-  ck "exports 64 (63 Java_ + JNI_OnLoad)" "[[ \$(llvm-nm -D --defined-only '$so' | wc -l) == 64 && \$(llvm-nm -D --defined-only '$so' | grep -c ' Java_') == 63 ]]"
+  NEW_EXPORTS="nativeSetBufferConfig nativeSetTlsVerify nativeGetTracks nativeSelectTrack nativeGetCue nativeAddTimedText"
+  ck "exports == s5 + 6 new" "diff -q <( (llvm-nm -D --defined-only '$so5' | awk '{print \$3}' | sed -E 's/Java_com_msmedia_(net_)?/Java_com_mycjzb_media_player_/'; for e in \$NEW_EXPORTS; do echo Java_com_mycjzb_media_player_MediaPlayer_\${e}@@MSMEDIA_SINGLE_1.0; done) | sort) <(llvm-nm -D --defined-only '$so' | awk '{print \$3}' | sort) >/dev/null"
+  ck "exports 68 (67 Java_ + JNI_OnLoad)" "[[ \$(llvm-nm -D --defined-only '$so' | wc -l) == 68 && \$(llvm-nm -D --defined-only '$so' | grep -c ' Java_') == 67 ]]"
   ck "no libssl/libcrypto NEEDED" "! llvm-readelf -d '$so' | grep -qE 'libssl|libcrypto'"
   ck "no RELR (API18)" "! llvm-readelf -S '$so' | grep -q '\.relr\.dyn'"
   ck "no DT_RELR/ANDROID_REL" "! llvm-readelf -d '$so' | grep -qE 'RELR|ANDROID_REL'"

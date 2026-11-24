@@ -20,7 +20,7 @@ AI 字幕默认禁用、默认不上传音频。禁用或未配置时不采集�
 ## TLS 策略（路线 B 单 so）
 
 - 播放拉流（https / rtmps / HLS 切片与密钥）默认**不校验**证书链和主机名，用于兼容自签证书、IP 直连和根证书过期的老盒子；`MediaPlayer.setPlaybackTlsVerify(true)` 切回严格校验。
-- 业务接口 `com.msmedia.net.MsHttpClient` **始终严格**：系统 CA 目录（不含用户安装的 CA）+ 主机名 / IP 校验，没有关闭开关。
+- 业务接口 `com.mycjzb.media.player.MsHttpClient` **始终严格**：系统 CA 目录（不含用户安装的 CA）+ 主机名 / IP 校验，没有关闭开关。
 - 两者共用同一份静态 OpenSSL 3.5.9（只保留 TLS 1.2/1.3 客户端），但用不同的 SSL_CTX，互不影响。自动化测试：`tests/single_s6_hls_test.sh`。
 
 ## 报告漏洞
