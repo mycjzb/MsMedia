@@ -93,6 +93,11 @@ typedef struct ms_hw_and {
     int started;
     int closing;
     int fr_hooked;
+    /* Media3 式出帧：太早的输出缓冲留在这里（最多 1 个），下轮 drive 再决定。
+     * flush/close 后 index 失效，必须清掉。by: Long <mycjzb@gmail.com> */
+    int held;
+    ssize_t held_idx;
+    AMediaCodecBufferInfo held_info;
 } ms_hw_and;
 
 /* MediaCodec 的 H.264 csd-0/csd-1 需要起始码。split 给出的是裸 NAL。 */
@@ -187,6 +192,24 @@ ms_status ms_hw_android_query(ms_codec codec, int api_level, int allow_sw,
 }
 
 
+/* AMediaCodec_releaseOutputBufferAtTime 自 API 21（libmediandk）；dlsym 取，缺失则回退立即 render。
+ * 对齐 Media3 renderOutputBufferV21：releaseTimeNs 为 System.nanoTime 基准（CLOCK_MONOTONIC）。 */
+typedef media_status_t (*ms_hw_rel_at_fn)(AMediaCodec *, size_t, int64_t);
+
+static ms_hw_rel_at_fn load_rel_at_fn(void)
+{
+    static ms_hw_rel_at_fn fn;
+    static int tried;
+    if (!tried) {
+        void *h = dlopen("libmediandk.so", RTLD_NOW);
+        tried = 1;
+        if (h) {
+            fn = (ms_hw_rel_at_fn)dlsym(h, "AMediaCodec_releaseOutputBufferAtTime");
+        }
+    }
+    return fn;
+}
+
 /* NDK AMediaCodec_setOnFrameRenderedCallback 自 API 33；用 dlsym 避免 API 21 链接失败。
  * 官方说明：仅供参考、可能延迟/批处理，有的帧已渲染也可能无回调。不是上屏证明，不得写入 display。 */
 typedef media_status_t (*ms_hw_set_fr_fn)(AMediaCodec *,
@@ -273,6 +296,7 @@ static void close_and(ms_hw_decoder *d)
          * 随后 delete/release 或仍在跑的 looper 再加锁会 FORTIFY 并可能 SIGABRT。
          * 已 start 时先 flush 归还 in-flight buffer，再只调用 delete
          *（内部 release + join looper）。未 start 同样只 delete 一次。 */
+        p->held = 0;
         if (p->started) {
             (void)AMediaCodec_flush(p->codec);
         }
@@ -721,6 +745,13 @@ ms_status ms_hw_android_drive(ms_hw_decoder *d)
     if (st != MS_OK && st != MS_AGAIN && st != MS_LIMIT)
         return st;
     memset(&info, 0, sizeof(info));
+    if (p->held) {
+        /* 上轮判定“太早”的缓冲：不再 dequeue，直接重新判定。 */
+        idx = p->held_idx;
+        info = p->held_info;
+        p->held = 0;
+        goto have_output;
+    }
     /* 非 0 超时：部分软件/goldfish 解码器在 timeout=0 的空转下长期不输出。10ms 仍非阻塞级。
      * FORMAT_CHANGED 后同一次 drive 再取一帧，避免测试路径多一轮才看见输出。 */
     {
@@ -774,8 +805,39 @@ ms_status ms_hw_android_drive(ms_hw_decoder *d)
             return saw_fmt ? MS_OK : MS_AGAIN;
         }
     }
-    /* Surface：render=true 且不回读像素。无窗口：拷一帧后 render=false，供测试取证。 */
-    if (!p->window) {
+have_output:
+    /* Surface：render=true 且不回读像素。无窗口：拷一帧后 render=false，供测试取证。
+     * 有出帧回调时按 Media3 VideoFrameReleaseControl 决定：立即/定时/丢弃/稍后。 */
+    if (p->window && d->release_fn) {
+        int64_t rel_ns = 0;
+        int is_eos = (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
+        ms_hw_rel_at_fn at_fn = load_rel_at_fn();
+        ms_hw_release_action act = d->release_fn(d->release_fn_ctx,
+                                                 (int64_t)info.presentationTimeUs,
+                                                 is_eos, at_fn != NULL, &rel_ns);
+        if (act == MS_HW_REL_LATER) {
+            p->held = 1;
+            p->held_idx = idx;
+            p->held_info = info;
+            return MS_AGAIN;
+        }
+        if (act == MS_HW_REL_DROP) {
+            if (AMediaCodec_releaseOutputBuffer(p->codec, (size_t)idx, 0) != AMEDIA_OK) {
+                ms_hw_set_detail(d, "releaseOutputBuffer(drop) failed");
+                return MS_ERR_UNKNOWN;
+            }
+            goto after_release; /* 丢帧不推 OUTPUT_RENDERED */
+        }
+        if (act == MS_HW_REL_AT && at_fn != NULL) {
+            if (at_fn(p->codec, (size_t)idx, rel_ns) != AMEDIA_OK) {
+                ms_hw_set_detail(d, "releaseOutputBufferAtTime failed");
+                return MS_ERR_UNKNOWN;
+            }
+        } else if (AMediaCodec_releaseOutputBuffer(p->codec, (size_t)idx, 1) != AMEDIA_OK) {
+            ms_hw_set_detail(d, "releaseOutputBuffer failed");
+            return MS_ERR_UNKNOWN;
+        }
+    } else if (!p->window) {
         size_t cap = 0;
         uint8_t *ob = AMediaCodec_getOutputBuffer(p->codec, (size_t)idx, &cap);
         size_t off = (size_t)info.offset;
@@ -824,6 +886,7 @@ ms_status ms_hw_android_drive(ms_hw_decoder *d)
         if (st != MS_OK)
             return st;
     }
+after_release:
     if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
         ms_hw_event ev;
         memset(&ev, 0, sizeof(ev));
@@ -840,6 +903,7 @@ ms_status ms_hw_android_flush(ms_hw_decoder *d)
     ms_hw_and *p = d ? (ms_hw_and *)d->plat : NULL;
     if (!p || !p->codec)
         return MS_OK;
+    p->held = 0; /* flush 后所有输出 index 失效 */
     if (AMediaCodec_flush(p->codec) != AMEDIA_OK) {
         ms_hw_set_detail(d, "AMediaCodec_flush failed");
         return MS_ERR_UNKNOWN;

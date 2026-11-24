@@ -3518,3 +3518,20 @@ by: Long <mycjzb@gmail.com>
 - 包名统一为 `com.mycjzb.media.player`（`MsHttpClient` 从 `net` 子包移入），JNI 符号、FindClass、版本脚本、校验脚本、演示 App、混淆规则（新增 `android/hw/consumer-rules.pro`）、文档同步。
 - 测试：`build.sh test` 通过；`single_s6_verify.sh` 377 PASS / 0 FAIL；API34 模拟器 3 轮自测 67 PASS / 8 FAIL（失败集中在模拟器卡顿导致的时序：第 1 轮 prepare 后轨道表暂空、内嵌字幕时间窗内没播到、取消字幕后 1.5 s 内未见 null 回调；第 3 轮全过）。API18、ASan 本轮未复跑。
 - 体积（s6 oz-flto，字节）：v7a 2797212（+2968）、v8a 3151224（+3088）、x86 3209312（+3544）、x86_64 3412552（+3088）。
+
+## 阶段 8（2026-11-24）：Android 硬解播放音画同步对齐 Media3
+
+by: Long <mycjzb@gmail.com>。细节与阈值出处见 `docs/DESIGN_AUDIT.md` 第 7 节（androidx/media main@`101e97c` 逐项核对）。
+
+- **音频钟**（`src/hw/ms_hw_audio.c`）：移植 `AudioTrackPositionTracker` + `AudioTimestampPoller`。API 19+ 轮询 `AudioTrack.getTimestamp`，只有确认在前进才用；否则用 10 个 head 偏移样本平滑，并扣 `getLatency()` − 缓冲时长（隐藏方法，取不到为 0）。位置不超过已写帧，暂停/恢复/flush 重置。API 18 恒走平滑 head。200 ms 停滞兜底保留（以原始 head 判定）。
+- **视频出帧**（`ms_hw_android.c` NDK、`ms_hw_jni.c` API 18–20、`ms_hw_player.c`）：解码器出帧前回调 `sync_release_decide`，按 Media3 顺序判定：强制释放 → 定时 + VSYNC 吸附 → 严重落后丢到关键帧 → 迟到丢帧 → 超前握住。API 21+ 用 `AMediaCodec_releaseOutputBufferAtTime`；API < 21 到点 `render=true`。VSYNC 采样在 `ms_hw_android_dispatch.c`（常驻 ALooper 线程 + AChoreographer，API 24+）。
+- **阈值**：-30 ms 丢帧、-500 ms 丢到关键帧、+50 ms 暂缓、100 ms 强制释放、20 ms 帧节奏、80% VSYNC 提前（旧值 80/200 ms 作废，宿主 `drain_vpend` 同步改）。
+- **保留**：首帧立即出、暂停/Surface 重绑/seek 后出当前帧、无音频直接出、2 s 卡死冲洗（握帧时不触发）。修了 API 18–20 输出事件漏标 `has_pts`。
+- **统计**：`ms_hw_player_stats` 尾部加 7 个字段；logcat `MsSync` 每 5 s 一行；`format_stats` 的 av_sync 行带上这些计数。
+
+测试：
+- `build.sh test`（ASan/UBSan）通过；`single_s6_verify.sh` 377 PASS / 0 FAIL（导出仍 68，NEEDED 不变；新增 `ALooper_*` 来自 libandroid，API 9 起就有）。
+- 体积（oz-flto，字节）：v7a 2803928（+6716）、v8a 3158112（+6888）、x86 3219388（+10076）、x86_64 3420040（+7488）。`MsSpeed-slimff-release-arm.apk` 6017577。
+- API 34 模拟器（TCG、`-accel off`、`-no-audio`）：VSYNC 周期采到 16666666 ns，`getLatency` 扣除后约 90 ms，钟源在平滑 head（2）与停滞兜底（4）间切换，未进入 getTimestamp（模拟器无音频输出）。解码极慢：160x90@25fps 样片 SurfaceFlinger 实测约 1.5 fps（阶段 7 包同条件约 2.1 fps，两者都远低于实时），视频始终落后音频数秒到数十秒，所以只走到强制释放（每 >100 ms 出一帧）与丢到关键帧；超前握住、定时释放（`scheduled`）在模拟器上为 0，**未被触发**。选轨/字幕自测 1 轮 21 PASS / 3 FAIL（默认字幕选中态、内嵌字幕时间窗、取消字幕后 null 回调，与阶段 7 的时序类失败同类），无崩溃。
+- API 18 模拟器冒烟：装包、prepared 838 ms，无 VerifyError / UnsatisfiedLinkError / 崩溃；首帧仍因该 AVD 的 OMX.google.h264 解码器环境问题超时（与之前一致），API 18 回退路径的实际出帧未验证。
+- 未验证：真机口型同步、真机上 getTimestamp/getLatency 行为、定时释放 + VSYNC 吸附的实际效果、高刷屏、直通音频下的时钟。

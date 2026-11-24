@@ -371,9 +371,17 @@ static void format_stats(char *dst, size_t cap, const ms_hw_player *p, const cha
         if (n + 8 < cap) {
             snprintf(dst + n, cap - n,
                      "\nav_sync: have=%d video_pts_us=%lld audio_clock_us=%lld delta_us=%lld "
-                     "(video PTS minus audio clock; coarse, not device lip-sync).",
+                     "media3=%d clock_src=%d latency_us=%lld vsync_ns=%lld held=%llu "
+                     "dropped_late=%llu forced_late=%llu drop_to_key=%llu scheduled=%llu "
+                     "(not device lip-sync).",
                      st.have_av_sync, (long long)st.video_last_pts_us,
-                     (long long)st.audio_clock_us, (long long)st.av_sync_delta_us);
+                     (long long)st.audio_clock_us, (long long)st.av_sync_delta_us,
+                     st.sync_in_decoder, st.audio_clock_source, (long long)st.audio_latency_us,
+                     (long long)st.vsync_period_ns, (unsigned long long)st.video_au_held,
+                     (unsigned long long)st.video_au_dropped_late,
+                     (unsigned long long)st.video_au_late,
+                     (unsigned long long)st.video_drop_to_keyframe,
+                     (unsigned long long)st.video_release_scheduled);
         }
         n = strlen(dst);
         if (n + 8 < cap) {

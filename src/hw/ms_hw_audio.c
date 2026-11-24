@@ -203,6 +203,7 @@ struct ms_hw_audio {
     void *pcm_tap_ctx;
     uint64_t track_write_bytes;
     uint64_t track_write_frames;
+    int clock_in_fallback; /* 最近一次取钟走了 200ms 停滞兜底 */
     /* 音频钟停走（AudioTrack 头不前或写配额耗尽）时的单调时钟兜底，避免等钟卡住视频。 */
     int64_t clock_mono_last_change_ns;
     int64_t clock_last_raw_us;
@@ -231,6 +232,8 @@ ms_status ms_hw_audio_android_open(ms_hw_audio *a, const ms_hw_audio_config *cfg
 void ms_hw_audio_android_close(ms_hw_audio *a);
 ms_status ms_hw_audio_android_drive(ms_hw_audio *a);
 int64_t ms_hw_audio_android_played_frames(const ms_hw_audio *a);
+int ms_hw_audio_android_position_us(const ms_hw_audio *a, int64_t *pos_us, int64_t *raw_us);
+void ms_hw_audio_android_sync_info(const ms_hw_audio *a, int *src, int64_t *latency_us);
 void ms_hw_audio_android_flush(ms_hw_audio *a);
 ms_status ms_hw_audio_android_set_rate(ms_hw_audio *a, int num, int den);
 void ms_hw_audio_android_set_paused(ms_hw_audio *a, int paused);
@@ -1700,7 +1703,9 @@ static int64_t audio_clock_hold_emitted(ms_hw_audio *a, int64_t cand)
     return cand;
 }
 
-static int64_t audio_clock_with_fallback(const ms_hw_audio *ca, int64_t raw_us)
+/* raw_us：原始播放头（只用来判定输出是否停滞）；est_us：要发出的时钟值
+ * （Android 上为 Media3 式时间戳/平滑估算，其他平台与 raw_us 相同）。 */
+static int64_t audio_clock_with_fallback(const ms_hw_audio *ca, int64_t raw_us, int64_t est_us)
 {
     ms_hw_audio *a = (ms_hw_audio *)(void *)ca;
     int64_t now;
@@ -1711,29 +1716,30 @@ static int64_t audio_clock_with_fallback(const ms_hw_audio *ca, int64_t raw_us)
     if (a->paused || a->quota_armed) {
         a->clock_fallback_origin_ns = 0;
         /* 暂停/配额路径不以墙钟前进，但仍不得低于已发出的兜底钟。 */
-        return audio_clock_hold_emitted(a, raw_us);
+        return audio_clock_hold_emitted(a, est_us);
     }
     now = audio_mono_ns();
     if (now <= 0) {
-        return audio_clock_hold_emitted(a, raw_us);
+        return audio_clock_hold_emitted(a, est_us);
     }
     if (raw_us != a->clock_last_raw_us) {
         a->clock_last_raw_us = raw_us;
         a->clock_mono_last_change_ns = now;
-        if (raw_us >= a->clock_emitted_us) {
+        if (est_us >= a->clock_emitted_us) {
             a->clock_fallback_origin_ns = 0;
-            a->clock_emitted_us = raw_us;
-            return raw_us;
+            a->clock_emitted_us = est_us;
+            return est_us;
         }
         /* head 刚动但仍落后于已发出的兜底钟：保持单调，直到 head 追上。 */
         return a->clock_emitted_us;
     }
     if (a->clock_mono_last_change_ns == 0) {
         a->clock_mono_last_change_ns = now;
-        return audio_clock_hold_emitted(a, raw_us);
+        return audio_clock_hold_emitted(a, est_us);
     }
     if (now - a->clock_mono_last_change_ns < MS_HW_AUDIO_CLOCK_STALL_NS) {
-        return audio_clock_hold_emitted(a, raw_us);
+        /* head 未满 200ms 不动：Media3 的平滑估算本身随系统时钟走，直接用估算值。 */
+        return audio_clock_hold_emitted(a, est_us);
     }
     /* 输出设备停转（如 AVD -no-audio）：用单调时钟兜底，让呈现/位置继续前进。
      * origin 锚在 last_change，使第一次兜底读数包含已停转的时段，而不是从 raw 再起跳。 */
@@ -1744,6 +1750,7 @@ static int64_t audio_clock_with_fallback(const ms_hw_audio *ca, int64_t raw_us)
         }
         a->clock_fallback_origin_ns = base - raw_us * 1000ll;
     }
+    a->clock_in_fallback = 1;
     {
         int64_t wall = (now - a->clock_fallback_origin_ns) / 1000ll;
         out = wall > raw_us ? wall : raw_us;
@@ -1757,19 +1764,38 @@ ms_status ms_hw_audio_get_clock_us(const ms_hw_audio *a, int64_t *clock_us)
     if (a == NULL || clock_us == NULL) {
         return MS_ERR_INVALID_ARG;
     }
+    ((ms_hw_audio *)(void *)a)->clock_in_fallback = 0;
 #ifdef __ANDROID__
     {
-        int64_t fr = ms_hw_audio_android_played_frames(a);
-        if (fr >= 0 && a->sample_rate > 0) {
-            raw = (fr * 1000000ll) / a->sample_rate;
-            *clock_us = audio_clock_with_fallback(a, raw);
+        int64_t est = 0;
+        if (ms_hw_audio_android_position_us(a, &est, &raw) == 0) {
+            *clock_us = audio_clock_with_fallback(a, raw, est);
             return MS_OK;
         }
     }
 #endif
     raw = a->clock_us;
-    *clock_us = audio_clock_with_fallback(a, raw);
+    *clock_us = audio_clock_with_fallback(a, raw, raw);
     return MS_OK;
+}
+
+void ms_hw_audio_sync_info(const ms_hw_audio *a, int *src, int64_t *latency_us)
+{
+    if (src) {
+        *src = 0;
+    }
+    if (latency_us) {
+        *latency_us = 0;
+    }
+    if (a == NULL) {
+        return;
+    }
+#ifdef __ANDROID__
+    ms_hw_audio_android_sync_info(a, src, latency_us);
+#endif
+    if (a->clock_in_fallback && src) {
+        *src = 4;
+    }
 }
 
 void ms_hw_audio_debug_backdate_clock_change(ms_hw_audio *a, int64_t ns_ago)
@@ -1904,6 +1930,28 @@ typedef struct audio_plat {
     jobject j_in_bufs;
     jobject j_out_bufs;
     jobject j_bufinfo;
+    /* Media3 AudioTrackPositionTracker / AudioTimestampPoller 精简移植的状态（见 at_* 函数）。 */
+    int at_sdk;
+    int at_buf_bytes;     /* AudioTrack 缓冲字节（getMinBufferSize 结果） */
+    int at_frame_bytes;   /* PCM 每帧字节；直通为 0（Media3 非 PCM 不扣延迟） */
+    int64_t at_wr_frames; /* 自上次 flush/新建以来写入帧数，位置上限 */
+    jmethodID at_m_ts;
+    jmethodID at_m_lat;
+    int at_lat_dead;      /* getLatency 不存在或调用失败，不再尝试 */
+    jobject at_ts_obj;    /* 全局引用 android.media.AudioTimestamp */
+    jfieldID at_f_frame;
+    jfieldID at_f_nano;
+    int at_ts_dead;
+    int at_state;
+    int64_t at_init_sys_us, at_last_poll_us, at_interval_us;
+    int64_t at_init_frames, at_init_ts_sys_us;
+    int64_t at_ts_frames, at_ts_sys_us, at_ts_raw_last, at_ts_wraps;
+    int64_t at_ph_off[10];
+    int at_ph_n, at_ph_i;
+    int64_t at_ph_last_us, at_ph_smooth;
+    int64_t at_lat_us, at_lat_last_us;
+    int64_t at_last_sys_us, at_last_pos_us;
+    int at_src;
 } audio_plat;
 
 #define MS_HW_AUDIO_PCM_LEFT_MAX ((size_t)64 * 1024)
@@ -1920,6 +1968,8 @@ static void plat_clear_pcm_left(audio_plat *plat)
     plat->pcm_left_cap = 0;
 }
 
+static void at_reset(audio_plat *plat, int all);
+
 static void plat_reset_head(audio_plat *plat)
 {
     if (plat == NULL) {
@@ -1928,6 +1978,8 @@ static void plat_reset_head(audio_plat *plat)
     plat->head_raw = 0;
     plat->head_wraps = 0;
     plat->head_valid = 0;
+    plat->at_wr_frames = 0;
+    at_reset(plat, 1);
 }
 
 static void plat_writer_stop(audio_plat *plat);
@@ -2783,7 +2835,12 @@ void ms_hw_audio_android_close(ms_hw_audio *a)
                 (*env)->DeleteLocalRef(env, cl);
             }
             (*env)->DeleteGlobalRef(env, plat->track);
+            if (plat->at_ts_obj) {
+                (*env)->DeleteGlobalRef(env, plat->at_ts_obj);
+            }
         }
+        plat->at_ts_obj = NULL;
+        plat->at_m_ts = NULL;
         plat->track = NULL;
         plat->track_ready = 0;
     }
@@ -2844,6 +2901,9 @@ static int ensure_track(ms_hw_audio *a, int rate, int ch)
         (*env)->DeleteLocalRef(env, cl);
         return -1;
     }
+    plat->at_buf_bytes = (int)minbuf;
+    plat->at_frame_bytes = (enc == 2) ? ((ch >= 2) ? 4 : 2) : 0; /* 仅 PCM16 立体声/单声道 */
+    plat->at_sdk = ms_hw_device_sdk_int();
     obj = (*env)->NewObject(env, cl, ctor, stream, rate, fmt, enc, minbuf, mode);
     if (!obj || (*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
@@ -2856,6 +2916,8 @@ static int ensure_track(ms_hw_audio *a, int rate, int ch)
     (*env)->DeleteLocalRef(env, obj);
     (*env)->DeleteLocalRef(env, cl);
     plat->track_ready = 1;
+    plat->at_wr_frames = 0;
+    at_reset(plat, 1); /* 新轨道：位置跟踪从 INITIALIZING 开始 */
     if (plat->vol_set) {
         (void)ms_hw_audio_set_volume(a, plat->vol_left, plat->vol_right);
     }
@@ -3162,6 +3224,408 @@ int64_t ms_hw_audio_android_played_frames(const ms_hw_audio *a)
 }
 
 
+/*
+ * ---- 音频位置：Media3 AudioTrackPositionTracker + AudioTimestampPoller 精简移植 ----
+ * 来源 androidx/media main@101e97c（2026-11-24 核对），常量逐一对应：
+ *   AudioTimestampPoller: FAST_POLL_INTERVAL_US=10_000, SLOW_POLL_INTERVAL_US=10_000_000,
+ *     ERROR_POLL_INTERVAL_US=500_000, INITIALIZING_DURATION_US=500_000,
+ *     MAX_POSITION_DRIFT_ADVANCING_TIMESTAMP_US=1000, WAIT_FOR_ADVANCE_DURATION_US=2_000_000,
+ *     MAX_AUDIO_TIMESTAMP_OFFSET_US=5s；状态 INITIALIZING/TIMESTAMP/TIMESTAMP_ADVANCING/NO_TIMESTAMP/ERROR。
+ *   AudioTrackPositionTracker: MAX_LATENCY_US=10s, MAX_POSITION_DRIFT_FOR_SMOOTHING_US=1s,
+ *     MAX_POSITION_SMOOTHING_SPEED_CHANGE_PERCENT=10, MAX_PLAYHEAD_OFFSET_COUNT=10,
+ *     MIN_PLAYHEAD_OFFSET_SAMPLE_INTERVAL_US=30_000, MIN_LATENCY_SAMPLE_INTERVAL_US=50_0000(=500ms)。
+ * 规则：只有时间戳“确认在前进”(TIMESTAMP_ADVANCING) 才用 getTimestamp 外推；否则用
+ *   系统时钟 + 10 个 head 偏移样本平均（head 粒度约 20ms，平滑防抖），并减去
+ *   getLatency()*1000 - 缓冲时长（隐藏方法，取不到就为 0；仅 PCM）。时间戳模式不扣延迟。
+ * API 18 无 getTimestamp：恒走平滑 head。位置不超过已写帧；暂停/flush/恢复时重置（Media3 pause/start 亦重置）。
+ * 未移植：PLAYSTATE_STOPPED 后的模拟位置、onPositionAdvancing 回调、各类错误上报监听。
+ * by: Long <mycjzb@gmail.com>
+ */
+enum { AT_INIT = 0, AT_TS, AT_TS_ADV, AT_NO_TS, AT_ERR };
+#define AT_FAST_POLL_US 10000ll
+#define AT_SLOW_POLL_US 10000000ll
+#define AT_ERROR_POLL_US 500000ll
+#define AT_INIT_DUR_US 500000ll
+#define AT_ADV_DRIFT_US 1000ll
+#define AT_WAIT_ADV_US 2000000ll
+#define AT_MAX_TS_OFFSET_US 5000000ll
+#define AT_MAX_LATENCY_US 10000000ll
+#define AT_SMOOTH_DRIFT_US 1000000ll
+#define AT_SMOOTH_PCT 10
+#define AT_PH_COUNT 10
+#define AT_PH_INTERVAL_US 30000ll
+#define AT_LAT_INTERVAL_US 500000ll
+
+static int64_t at_now_us(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (int64_t)ts.tv_sec * 1000000ll + (int64_t)ts.tv_nsec / 1000ll;
+}
+
+static void at_set_state(audio_plat *plat, int st)
+{
+    plat->at_state = st;
+    switch (st) {
+    case AT_INIT:
+        plat->at_last_poll_us = 0;
+        plat->at_init_frames = -1;
+        plat->at_init_ts_sys_us = 0;
+        plat->at_init_sys_us = at_now_us();
+        plat->at_interval_us = AT_FAST_POLL_US;
+        break;
+    case AT_TS:
+        plat->at_interval_us = AT_FAST_POLL_US;
+        break;
+    case AT_TS_ADV:
+    case AT_NO_TS:
+        plat->at_interval_us = AT_SLOW_POLL_US;
+        break;
+    default:
+        plat->at_interval_us = AT_ERROR_POLL_US;
+        break;
+    }
+}
+
+/* all=1：flush/新建（帧计数归零）；all=0：暂停/恢复（只重置同步参数与轮询器）。 */
+static void at_reset(audio_plat *plat, int all)
+{
+    if (plat == NULL) {
+        return;
+    }
+    plat->at_ph_n = 0;
+    plat->at_ph_i = 0;
+    plat->at_ph_last_us = 0;
+    plat->at_ph_smooth = 0;
+    plat->at_last_sys_us = 0;
+    plat->at_last_pos_us = 0;
+    if (all) {
+        plat->at_ts_raw_last = 0;
+        plat->at_ts_wraps = 0;
+        plat->at_ts_frames = 0;
+        plat->at_lat_last_us = 0;
+    }
+    at_set_state(plat, AT_INIT);
+}
+
+static int64_t at_frames_to_us(int64_t fr, int rate)
+{
+    return rate > 0 ? (fr * 1000000ll) / rate : 0;
+}
+
+static int64_t at_ts_pos_from(int64_t frames, int64_t ts_sys_us, int64_t now_us, double speed,
+                              int rate)
+{
+    /* computeTimestampPositionUs：时间戳帧位置 + 之后经过的（换算为媒体时长）时间 */
+    return at_frames_to_us(frames, rate) + (int64_t)((double)(now_us - ts_sys_us) * speed);
+}
+
+static int64_t at_head_estimate(audio_plat *plat, int64_t now_us, int64_t head_us, double speed)
+{
+    int64_t pos;
+    if (plat->at_ph_n == 0) {
+        pos = head_us;
+    } else {
+        pos = (int64_t)((double)(now_us + plat->at_ph_smooth) * speed);
+    }
+    pos -= plat->at_lat_us;
+    return pos > 0 ? pos : 0;
+}
+
+static int at_poll_timestamp(audio_plat *plat, JNIEnv *env, jobject track)
+{
+    jboolean ok;
+    if (plat->at_ts_dead || plat->at_sdk < 19) {
+        return 0;
+    }
+    if (plat->at_m_ts == NULL) {
+        jclass tcl = (*env)->FindClass(env, "android/media/AudioTimestamp");
+        jclass cl = (*env)->GetObjectClass(env, track);
+        jmethodID ctor;
+        jobject o;
+        if (tcl == NULL || cl == NULL) {
+            (*env)->ExceptionClear(env);
+            plat->at_ts_dead = 1;
+            return 0;
+        }
+        ctor = (*env)->GetMethodID(env, tcl, "<init>", "()V");
+        plat->at_f_frame = (*env)->GetFieldID(env, tcl, "framePosition", "J");
+        plat->at_f_nano = (*env)->GetFieldID(env, tcl, "nanoTime", "J");
+        plat->at_m_ts = (*env)->GetMethodID(env, cl, "getTimestamp",
+                                            "(Landroid/media/AudioTimestamp;)Z");
+        o = (ctor != NULL) ? (*env)->NewObject(env, tcl, ctor) : NULL;
+        if ((*env)->ExceptionCheck(env) || o == NULL || plat->at_m_ts == NULL ||
+            plat->at_f_frame == NULL || plat->at_f_nano == NULL) {
+            (*env)->ExceptionClear(env);
+            plat->at_ts_dead = 1;
+            plat->at_m_ts = NULL;
+        } else {
+            plat->at_ts_obj = (*env)->NewGlobalRef(env, o);
+        }
+        if (o) {
+            (*env)->DeleteLocalRef(env, o);
+        }
+        (*env)->DeleteLocalRef(env, tcl);
+        (*env)->DeleteLocalRef(env, cl);
+        if (plat->at_ts_dead || plat->at_ts_obj == NULL) {
+            plat->at_ts_dead = 1;
+            return 0;
+        }
+    }
+    ok = (*env)->CallBooleanMethod(env, track, plat->at_m_ts, plat->at_ts_obj);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+    if (!ok) {
+        return 0;
+    }
+    {
+        /* AudioTimestampWrapper.maybeUpdateTimestamp：回绕计数（flush 时整体重置）。 */
+        int64_t raw = (int64_t)(*env)->GetLongField(env, plat->at_ts_obj, plat->at_f_frame);
+        int64_t nano = (int64_t)(*env)->GetLongField(env, plat->at_ts_obj, plat->at_f_nano);
+        if (plat->at_ts_raw_last > raw) {
+            plat->at_ts_wraps++;
+        }
+        plat->at_ts_raw_last = raw;
+        plat->at_ts_frames = raw + (plat->at_ts_wraps << 32);
+        plat->at_ts_sys_us = nano / 1000ll;
+    }
+    return 1;
+}
+
+/* AudioTimestampPoller.maybePollTimestamp */
+static void at_maybe_poll(audio_plat *plat, JNIEnv *env, jobject track, int64_t now_us,
+                          double speed, int rate, int64_t head_est_us, int force)
+{
+    int upd;
+    if (!force && now_us - plat->at_last_poll_us < plat->at_interval_us) {
+        return;
+    }
+    plat->at_last_poll_us = now_us;
+    upd = at_poll_timestamp(plat, env, track);
+    if (upd) {
+        /* checkTimestampIsPlausibleAndUpdateErrorState */
+        int64_t tpos = at_ts_pos_from(plat->at_ts_frames, plat->at_ts_sys_us, now_us, speed, rate);
+        int64_t d1 = plat->at_ts_sys_us - now_us;
+        int64_t d2 = tpos - head_est_us;
+        if (d1 < 0) {
+            d1 = -d1;
+        }
+        if (d2 < 0) {
+            d2 = -d2;
+        }
+        if (d1 > AT_MAX_TS_OFFSET_US || d2 > AT_MAX_TS_OFFSET_US) {
+            at_set_state(plat, AT_ERR);
+        } else if (plat->at_state == AT_ERR) {
+            at_set_state(plat, AT_INIT);
+        }
+    }
+    switch (plat->at_state) {
+    case AT_INIT:
+        if (upd) {
+            if (plat->at_ts_sys_us >= plat->at_init_sys_us) {
+                plat->at_init_frames = plat->at_ts_frames;
+                plat->at_init_ts_sys_us = plat->at_ts_sys_us;
+                at_set_state(plat, AT_TS);
+            }
+        } else if (now_us - plat->at_init_sys_us > AT_INIT_DUR_US) {
+            at_set_state(plat, AT_NO_TS);
+        }
+        break;
+    case AT_TS:
+        if (upd) {
+            int adv = 0;
+            if (plat->at_ts_frames > plat->at_init_frames) {
+                int64_t a0 = at_ts_pos_from(plat->at_init_frames, plat->at_init_ts_sys_us,
+                                            now_us, speed, rate);
+                int64_t a1 = at_ts_pos_from(plat->at_ts_frames, plat->at_ts_sys_us,
+                                            now_us, speed, rate);
+                int64_t dr = a1 - a0;
+                if (dr < 0) {
+                    dr = -dr;
+                }
+                adv = dr < AT_ADV_DRIFT_US;
+            }
+            if (adv) {
+                at_set_state(plat, AT_TS_ADV);
+            } else if (now_us - plat->at_init_sys_us > AT_WAIT_ADV_US) {
+                at_set_state(plat, AT_NO_TS);
+            } else {
+                plat->at_init_frames = plat->at_ts_frames;
+                plat->at_init_ts_sys_us = plat->at_ts_sys_us;
+            }
+        } else {
+            at_set_state(plat, AT_INIT);
+        }
+        break;
+    case AT_TS_ADV:
+        if (!upd) {
+            at_set_state(plat, AT_INIT);
+        }
+        break;
+    case AT_NO_TS:
+        if (upd) {
+            at_set_state(plat, AT_INIT);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* maybeUpdateLatency：隐藏方法 AudioTrack.getLatency()（毫秒，含缓冲），减去缓冲时长。 */
+static int at_maybe_update_latency(audio_plat *plat, JNIEnv *env, jobject track, int64_t now_us,
+                                   int rate)
+{
+    int64_t prev = plat->at_lat_us;
+    if (plat->at_frame_bytes <= 0 || plat->at_lat_dead || rate <= 0 ||
+        now_us - plat->at_lat_last_us < AT_LAT_INTERVAL_US) {
+        return 0;
+    }
+    plat->at_lat_last_us = now_us;
+    if (plat->at_m_lat == NULL) {
+        jclass cl = (*env)->GetObjectClass(env, track);
+        plat->at_m_lat = cl ? (*env)->GetMethodID(env, cl, "getLatency", "()I") : NULL;
+        if ((*env)->ExceptionCheck(env) || plat->at_m_lat == NULL) {
+            (*env)->ExceptionClear(env);
+            plat->at_m_lat = NULL;
+            plat->at_lat_dead = 1;
+        }
+        if (cl) {
+            (*env)->DeleteLocalRef(env, cl);
+        }
+        if (plat->at_lat_dead) {
+            return 0;
+        }
+    }
+    {
+        jint ms = (*env)->CallIntMethod(env, track, plat->at_m_lat);
+        int64_t buf_us;
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            plat->at_lat_dead = 1;
+            plat->at_lat_us = 0;
+            return prev != 0;
+        }
+        buf_us = at_frames_to_us((int64_t)(plat->at_buf_bytes / plat->at_frame_bytes), rate);
+        plat->at_lat_us = (int64_t)ms * 1000ll - buf_us;
+        if (plat->at_lat_us < 0) {
+            plat->at_lat_us = 0;
+        }
+        if (plat->at_lat_us > AT_MAX_LATENCY_US) {
+            plat->at_lat_us = 0;
+        }
+    }
+    return prev != plat->at_lat_us;
+}
+
+int ms_hw_audio_android_position_us(const ms_hw_audio *ca, int64_t *pos_us, int64_t *raw_us)
+{
+    ms_hw_audio *a = (ms_hw_audio *)(void *)ca;
+    audio_plat *plat;
+    JNIEnv *env = NULL;
+    int64_t fr, head_us, now_us, pos;
+    int rate;
+    int use_ts;
+    double speed = 1.0;
+    if (a == NULL || a->plat == NULL || a->sample_rate <= 0) {
+        return -1;
+    }
+    plat = (audio_plat *)a->plat;
+    fr = ms_hw_audio_android_played_frames(a);
+    if (fr < 0 || !ms_hw_jni_env(&env) || env == NULL) {
+        return -1;
+    }
+    rate = a->sample_rate;
+    head_us = at_frames_to_us(fr, rate);
+    *raw_us = head_us;
+    now_us = at_now_us();
+    if (plat->at_sdk >= 23 && a->rate_num > 0 && a->rate_den > 0) {
+        speed = (double)a->rate_num / (double)a->rate_den; /* PlaybackParams 速度 */
+    }
+    if (!a->paused && !a->quota_armed) {
+        /* maybeSampleSyncParams（仅 PLAYSTATE_PLAYING） */
+        if (now_us - plat->at_ph_last_us >= AT_PH_INTERVAL_US) {
+            int i;
+            if (head_us == 0) {
+                goto pos_out; /* 尚未出声：Media3 直接返回，不测延迟也不轮询时间戳 */
+            }
+            plat->at_ph_off[plat->at_ph_i] = (int64_t)((double)head_us / speed) - now_us;
+            plat->at_ph_i = (plat->at_ph_i + 1) % AT_PH_COUNT;
+            if (plat->at_ph_n < AT_PH_COUNT) {
+                plat->at_ph_n++;
+            }
+            plat->at_ph_last_us = now_us;
+            plat->at_ph_smooth = 0;
+            for (i = 0; i < plat->at_ph_n; i++) {
+                plat->at_ph_smooth += plat->at_ph_off[i] / plat->at_ph_n;
+            }
+        }
+        {
+            int lat_upd = at_maybe_update_latency(plat, env, plat->track, now_us, rate);
+            at_maybe_poll(plat, env, plat->track, now_us, speed, rate,
+                          at_head_estimate(plat, now_us, head_us, speed), lat_upd);
+        }
+    }
+pos_out:
+    use_ts = (plat->at_state == AT_TS_ADV) && !a->paused;
+    pos = use_ts ? at_ts_pos_from(plat->at_ts_frames, plat->at_ts_sys_us, now_us, speed, rate)
+                 : (a->paused ? head_us : at_head_estimate(plat, now_us, head_us, speed));
+    plat->at_src = use_ts ? 3 : (plat->at_ph_n > 0 && !a->paused ? 2 : 1);
+    if (plat->at_wr_frames > 0) {
+        int64_t max_us = at_frames_to_us(plat->at_wr_frames, rate);
+        if (pos >= max_us) {
+            /* 不超过已写入：重置同步参数与轮询器（Media3 同） */
+            at_reset(plat, 0);
+            *pos_us = max_us;
+            return 0;
+        }
+    }
+    if (!a->paused && plat->at_last_sys_us != 0) {
+        /* 位置平滑：漂移 <1s 且有变化时，限制相对预期 ±10% 的速度变化 */
+        int64_t el = now_us - plat->at_last_sys_us;
+        int64_t pdiff = pos - plat->at_last_pos_us;
+        int64_t exp_diff = (int64_t)((double)el * speed);
+        int64_t exp_pos = plat->at_last_pos_us + exp_diff;
+        int64_t drift = exp_pos - pos;
+        if (drift < 0) {
+            drift = -drift;
+        }
+        if (pdiff != 0 && drift < AT_SMOOTH_DRIFT_US) {
+            int64_t maxd = exp_diff * AT_SMOOTH_PCT / 100;
+            if (pos < exp_pos - maxd) {
+                pos = exp_pos - maxd;
+            } else if (pos > exp_pos + maxd) {
+                pos = exp_pos + maxd;
+            }
+        }
+    }
+    if (!a->paused) {
+        plat->at_last_sys_us = now_us;
+        plat->at_last_pos_us = pos;
+    }
+    *pos_us = pos;
+    return 0;
+}
+
+void ms_hw_audio_android_sync_info(const ms_hw_audio *a, int *src, int64_t *latency_us)
+{
+    audio_plat *plat = (a != NULL) ? (audio_plat *)a->plat : NULL;
+    if (plat == NULL || !plat->track_ready) {
+        return;
+    }
+    if (src) {
+        *src = plat->at_src;
+    }
+    if (latency_us) {
+        *latency_us = plat->at_lat_us;
+    }
+}
+
+
 void ms_hw_audio_android_flush(ms_hw_audio *a)
 {
     audio_plat *plat;
@@ -3236,6 +3700,9 @@ static void note_track_write(ms_hw_audio *a, int wr)
     }
     if (bpf > 0) {
         a->track_write_frames += (uint64_t)wr / (uint64_t)bpf;
+        if (a->plat) {
+            ((audio_plat *)a->plat)->at_wr_frames += (int64_t)((uint64_t)wr / (uint64_t)bpf);
+        }
     }
 }
 
@@ -3305,6 +3772,9 @@ static void pt_note_frames(ms_hw_audio *a, int wr, int frames)
     a->track_write_bytes += (uint64_t)(wr > 0 ? wr : 0);
     if (frames > 0) {
         a->track_write_frames += (uint64_t)frames;
+        if (a->plat) {
+            ((audio_plat *)a->plat)->at_wr_frames += frames;
+        }
     }
 }
 
@@ -3853,6 +4323,7 @@ void ms_hw_audio_android_set_paused(ms_hw_audio *a, int paused)
     if (cl) {
         (*env)->DeleteLocalRef(env, cl);
     }
+    at_reset(plat, 0); /* Media3 pause()/start() 均重置同步参数与时间戳轮询器 */
 }
 
 #endif /* __ANDROID__ */

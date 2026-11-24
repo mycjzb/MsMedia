@@ -25,6 +25,21 @@ typedef enum ms_hw_state {
     MS_HW_ST_DEAD
 } ms_hw_state;
 
+/*
+ * 出帧时机回调（对齐 Media3 VideoFrameReleaseControl 的 FRAME_RELEASE_*）。
+ * 只有 Android Surface 路径（NDK / Java MediaCodec）会调用；mock/VAAPI 不用。
+ * 回调在 decoder drive 线程里执行，不得再调用本解码器的 drive/flush。
+ * by: Long <mycjzb@gmail.com>
+ */
+typedef enum ms_hw_release_action {
+    MS_HW_REL_NOW = 0,   /* 立即 render（首帧、暂停重绑、无音频、强制释放） */
+    MS_HW_REL_AT = 1,    /* releaseOutputBuffer(index, releaseTimeNs)，仅 API 21+ */
+    MS_HW_REL_DROP = 2,  /* 迟到：releaseOutputBuffer(index, false)，不上屏 */
+    MS_HW_REL_LATER = 3  /* 太早：保留该输出缓冲，下轮 drive 再问 */
+} ms_hw_release_action;
+typedef ms_hw_release_action (*ms_hw_release_fn)(void *ctx, int64_t pts_us, int is_eos,
+                                                 int can_schedule, int64_t *release_ns);
+
 typedef struct ms_hw_slot {
     uint8_t *data;
     size_t size;
@@ -69,10 +84,25 @@ struct ms_hw_decoder {
     ms_hw_log_fn log_fn;
     void *log_ctx;
     int eos_sent;
+    /* 出帧时机回调（NULL=旧行为：一出来就 render）。can_schedule 由平台层告知回调。 */
+    ms_hw_release_fn release_fn;
+    void *release_fn_ctx;
 #ifdef __ANDROID__
     void *plat;
 #endif
 };
+
+/* 音频钟来源与输出延迟（见 ms_hw_player_stats.audio_clock_source）。宿主恒为 0。 */
+void ms_hw_audio_sync_info(const ms_hw_audio *a, int *src, int64_t *latency_us);
+
+#ifdef __ANDROID__
+/* VSYNC 采样（参照 Media3 VideoFrameReleaseHelper.VSyncSampler，精简版）：
+ * 进程级一个 ALooper 线程 + AChoreographer（API 24+；32 位进程需 API 29 的 64 位回调）。
+ * acquire/release 引用计数；不可用时 get 返回 0，调用方按未对齐处理。 */
+void ms_hw_vsync_acquire(void);
+void ms_hw_vsync_release(void);
+int ms_hw_vsync_get(int64_t *vsync_ns, int64_t *period_ns);
+#endif
 
 void *ms_hw_alloc(ms_hw_decoder *d, size_t n);
 void ms_hw_free(ms_hw_decoder *d, void *p);

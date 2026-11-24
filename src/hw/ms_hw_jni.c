@@ -644,6 +644,12 @@ typedef struct {
     size_t csd1_sc_n;
     /* 0=已是 Annex B；2/3/4=AVCC/HVCC 长度字段，提交前换成起始码。 */
     unsigned nal_len_size;
+    /* API 18–20 出帧：无 releaseOutputBuffer(int,long)，太早的缓冲留 1 个，到点再 render=true。
+     * flush/close 后 index 失效必须清。by: Long <mycjzb@gmail.com> */
+    int held;
+    jint held_idx;
+    jint held_flags;
+    jlong held_pts;
 } ms_hw_jni_codec;
 
 static void clear_exc(JNIEnv *env)
@@ -959,6 +965,8 @@ ms_status ms_hw_jni_codec_drive(ms_hw_decoder *d)
     unsigned i;
     ms_status st = MS_AGAIN;
 
+    jlong pts_v;
+
     if (!jc || !ms_hw_jni_env(&env))
         return MS_ERR_STATE;
     for (i = 0; i < d->in_cap; i++) {
@@ -967,6 +975,13 @@ ms_status ms_hw_jni_codec_drive(ms_hw_decoder *d)
         st = ms_hw_jni_codec_feed(d, i);
         if (st == MS_ERR_UNKNOWN || st == MS_ERR_OVERFLOW)
             return st;
+    }
+    if (jc->held) {
+        idx = jc->held_idx;
+        flags = jc->held_flags;
+        pts_v = jc->held_pts;
+        jc->held = 0;
+        goto have_output;
     }
     /* 与 NDK 路径一致：timeout=0 时 OMX.google / 部分软解可能一直 TRY_AGAIN、有提交无输出。
      * 10ms 仍非阻塞级。FORMAT/BUFFERS_CHANGED 后同一次 drive 再取，避免空转一轮。 */
@@ -1015,23 +1030,49 @@ ms_status ms_hw_jni_codec_drive(ms_hw_decoder *d)
     if (idx < 0)
         return MS_AGAIN;
     flags = (*env)->GetIntField(env, jc->bufinfo, g_bi_flags);
-    (*env)->CallVoidMethod(env, jc->codec, g_rel_out, idx, JNI_TRUE);
-    if ((*env)->ExceptionCheck(env)) {
-        clear_exc(env);
-        return MS_ERR_UNKNOWN;
+    pts_v = (*env)->GetLongField(env, jc->bufinfo, g_bi_pts);
+have_output:
+    if (d->release_fn && jc->surface) {
+        /* 无定时释放：回调只会给 NOW/DROP/LATER（can_schedule=0）。 */
+        int64_t rel_ns = 0;
+        ms_hw_release_action act = d->release_fn(d->release_fn_ctx, (int64_t)pts_v,
+                                                 (flags & 4) != 0, 0, &rel_ns);
+        if (act == MS_HW_REL_LATER) {
+            jc->held = 1;
+            jc->held_idx = idx;
+            jc->held_flags = flags;
+            jc->held_pts = pts_v;
+            return MS_AGAIN;
+        }
+        (*env)->CallVoidMethod(env, jc->codec, g_rel_out, idx,
+                               act == MS_HW_REL_DROP ? JNI_FALSE : JNI_TRUE);
+        if ((*env)->ExceptionCheck(env)) {
+            clear_exc(env);
+            return MS_ERR_UNKNOWN;
+        }
+        if (act == MS_HW_REL_DROP)
+            goto after_release; /* 丢帧不推 OUTPUT_RENDERED */
+    } else {
+        (*env)->CallVoidMethod(env, jc->codec, g_rel_out, idx, JNI_TRUE);
+        if ((*env)->ExceptionCheck(env)) {
+            clear_exc(env);
+            return MS_ERR_UNKNOWN;
+        }
     }
     {
         ms_hw_event ev;
         memset(&ev, 0, sizeof(ev));
         ev.struct_size = sizeof(ev);
         ev.type = MS_HW_EVENT_OUTPUT_RENDERED;
-        ev.pts = (*env)->GetLongField(env, jc->bufinfo, g_bi_pts);
+        ev.pts = pts_v;
+        ev.has_pts = 1; /* bufinfo.presentationTimeUs 有效；原先漏标导致 API 18 不参与同步统计 */
         ev.width = d->width;
         ev.height = d->height;
         d->stats.rendered_frames++;
         if (ms_hw_push_event(d, &ev) != MS_OK)
             return MS_LIMIT;
     }
+after_release:
     if (flags & 4) { /* BUFFER_FLAG_END_OF_STREAM */
         ms_hw_event ev;
         memset(&ev, 0, sizeof(ev));
@@ -1049,6 +1090,7 @@ ms_status ms_hw_jni_codec_flush(ms_hw_decoder *d)
     ms_hw_jni_codec *jc = d ? (ms_hw_jni_codec *)d->plat : NULL;
     if (!jc || !ms_hw_jni_env(&env))
         return MS_ERR_STATE;
+    jc->held = 0; /* flush 后输出 index 失效 */
     (*env)->CallVoidMethod(env, jc->codec, g_flush);
     if ((*env)->ExceptionCheck(env)) {
         clear_exc(env);
@@ -1087,6 +1129,7 @@ void ms_hw_jni_codec_close(ms_hw_decoder *d)
     ms_hw_jni_codec *jc = d ? (ms_hw_jni_codec *)d->plat : NULL;
     if (!jc)
         return;
+    jc->held = 0;
     if (ms_hw_jni_env(&env) && jc->codec) {
         (*env)->CallVoidMethod(env, jc->codec, g_stop);
         clear_exc(env);

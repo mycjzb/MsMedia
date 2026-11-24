@@ -437,6 +437,18 @@ typedef struct ms_hw_player_stats {
     int need_keyframe_resync;
     /* 加法：已识别的 HDR 信息（不扩展 ms_event）。kind=unknown 表示尚未识别。 */
     ms_hdr_info hdr;
+    /* 加法（阶段 8）：对齐 Media3 的音画同步。模拟器数字不代表真机口型同步。
+     * sync_in_decoder=1 时 video_au_held=因超前 >50ms 暂缓的缓冲数，video_au_dropped_late=迟到
+     * (<-30ms) 未渲染丢弃数，video_au_late=迟到但 >100ms 未出帧而强制上屏数。
+     * audio_clock_source：0=无/宿主 1=playbackHeadPosition 2=平滑 head（扣 getLatency）
+     * 3=AudioTrack.getTimestamp 4=输出停滞的单调钟兜底。 */
+    int sync_in_decoder;
+    int audio_clock_source;
+    int64_t audio_latency_us;
+    int64_t vsync_period_ns;          /* 0=未采样（API<24 或 32 位 API<29） */
+    uint64_t video_release_scheduled; /* releaseOutputBuffer(index, releaseTimeNs) 次数 */
+    uint64_t video_drop_to_keyframe;  /* 严重落后（<-500ms）冲到关键帧次数 */
+    int64_t video_last_early_us;      /* 最近一次出帧判定的 earlyUs */
 } ms_hw_player_stats;
 
 MSMEDIA_API void ms_hw_player_opts_default(ms_hw_player_opts *out);

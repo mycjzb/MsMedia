@@ -200,10 +200,41 @@ struct ms_hw_player {
     int have_pending_trim;
     uint32_t pending_skip_start;
     uint32_t pending_skip_end;
+    /* Media3 对齐的出帧决策（Android Surface 路径，见 sync_release_decide）。 */
+    int sync_in_decoder;          /* 1=解码器出帧前回调本播放器决定时机 */
+    int vsync_acquired;
+    int sync_holding;             /* 解码器正握着一个“太早”的输出缓冲 */
+    int sync_drop_to_key;         /* 严重落后：drive 返回后 flush 并等关键帧 */
+    int64_t sync_last_release_ns; /* 最近一次交 Surface 的单调时钟（强制释放判定用） */
+    int64_t sync_last_held_pts;
+    int64_t sync_last_early_us;
+    int64_t vfr_last_adj_ns;      /* VideoFrameReleaseHelper 帧节奏：上一帧调整后的释放时刻 */
+    int64_t vfr_last_pts_us;
+    int vfr_have;
+    uint64_t video_release_scheduled;
+    uint64_t video_drop_to_keyframe;
+    int64_t sync_log_ns;
 };
 
-#define MS_HW_SYNC_LATE_US 200000
-#define MS_HW_SYNC_EARLY_US 80000
+/*
+ * 阈值全部取自 Media3（androidx/media main@101e97c，2026-11-24 核对）：
+ *   MediaCodecVideoRenderer.MIN_EARLY_US_LATE_THRESHOLD        = -30_000  → 迟到丢帧
+ *   MediaCodecVideoRenderer.MIN_EARLY_US_VERY_LATE_THRESHOLD   = -500_000 → 丢到关键帧
+ *   MediaCodecVideoRenderer.DEFAULT_EARLY_SCHEDULING_THRESHOLD_US = 50_000 → 超前多于此先不交
+ *   shouldForceRenderOutputBuffer: 迟到且距上次释放 > 100_000us 则强制上屏
+ *   VideoFrameReleaseHelper.MAX_ALLOWED_ADJUSTMENT_NS = 20_000_000, VSYNC_OFFSET_PERCENTAGE = 80
+ * API < 21 无 releaseOutputBuffer(index, ns)：照 ExoPlayer 2.x（release-v2）renderOutputBuffer
+ * 旧路径“earlyUs > 11000 先等到约提前 10ms 再 render”，这里不在持锁线程里 sleep，改为 LATER 重询。
+ * mock/VAAPI 等不走回调的路径（宿主测试）沿用 drain_vpend 的同一组阈值。
+ * by: Long <mycjzb@gmail.com>
+ */
+#define MS_HW_SYNC_LATE_US 30000          /* -MIN_EARLY_US_LATE_THRESHOLD */
+#define MS_HW_SYNC_VERY_LATE_US 500000    /* -MIN_EARLY_US_VERY_LATE_THRESHOLD */
+#define MS_HW_SYNC_EARLY_US 50000         /* DEFAULT_EARLY_SCHEDULING_THRESHOLD_US */
+#define MS_HW_SYNC_FORCE_GAP_US 100000    /* shouldForceRenderOutputBuffer 的 100ms */
+#define MS_HW_SYNC_LEGACY_EARLY_US 11000  /* ExoPlayer 2.x API<21：>11ms 先等 */
+#define MS_HW_VFR_MAX_ADJ_NS 20000000ll   /* MAX_ALLOWED_ADJUSTMENT_NS */
+#define MS_HW_VSYNC_OFFSET_PCT 80         /* VSYNC_OFFSET_PERCENTAGE */
 #define MS_HW_CSD_PENDING_AU_MAX 16u
 
 typedef struct copy_rel {
@@ -523,6 +554,12 @@ static void clear_vpend(ms_hw_player *p)
 
 
 static void close_decoder(ms_hw_player *p);
+#ifdef __ANDROID__
+#include "ms_hw_api.h" /* ms_hw_device_sdk_int */
+#include <android/log.h>
+static ms_hw_release_action sync_release_decide(void *ctx, int64_t pts_us, int is_eos,
+                                                int can_schedule, int64_t *release_ns);
+#endif
 static void reset_stage_times(ms_hw_player *p);
 static int hw_find_track(const ms_hw_player *p, uint32_t id);
 static uint32_t hw_selected_id(const ms_hw_player *p, ms_track_kind kind);
@@ -1029,12 +1066,28 @@ static ms_status handle_inband_ps(ms_hw_player *p, const ms_event *ev, int *drop
     return MS_OK;
 }
 
+static void sync_reset(ms_hw_player *p)
+{
+    p->sync_holding = 0;
+    p->sync_drop_to_key = 0;
+    p->sync_last_held_pts = INT64_MIN;
+    p->vfr_have = 0;
+}
+
 static void close_decoder(ms_hw_player *p)
 {
     if (p->dec != NULL) {
         ms_hw_decoder_destroy(p->dec);
         p->dec = NULL;
     }
+    p->sync_in_decoder = 0;
+    sync_reset(p);
+#ifdef __ANDROID__
+    if (p->vsync_acquired) {
+        ms_hw_vsync_release();
+        p->vsync_acquired = 0;
+    }
+#endif
     p->configured = 0;
     p->started = 0;
     p->eos_out = 0;
@@ -1306,6 +1359,19 @@ static ms_status ensure_decoder(ms_hw_player *p)
         p->configured = 1;
         p->started = 1;
         p->waiting_key = (p->opts.wait_keyframe != 0);
+#ifdef __ANDROID__
+        /* 只有 Surface 输出才按 Media3 决定出帧时机；无 Surface（测试回读）保持旧行为。 */
+        if (p->surface != NULL && p->dec != NULL) {
+            p->dec->release_fn = sync_release_decide;
+            p->dec->release_fn_ctx = p;
+            p->sync_in_decoder = 1;
+            sync_reset(p);
+            if (!p->vsync_acquired && ms_hw_device_sdk_int() >= 21) {
+                ms_hw_vsync_acquire();
+                p->vsync_acquired = 1;
+            }
+        }
+#endif
     }
     return MS_OK;
 }
@@ -2267,6 +2333,146 @@ static int audio_clock_now(ms_hw_player *p, int64_t *clock_us)
     return *clock_us > 0;
 }
 
+#ifdef __ANDROID__
+static int64_t sync_mono_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (int64_t)ts.tv_sec * 1000000000ll + (int64_t)ts.tv_nsec;
+}
+
+/* VideoFrameReleaseHelper.adjustReleaseTime 精简：
+ * 1) 帧节奏平滑：按上一帧调整后的释放时刻 + PTS 差推算，偏差 ≤20ms 才采用（无帧率估计器，用 PTS 差）；
+ * 2) VSYNC 吸附：取最近的 vsync，再提前 80% 个周期交出去（落在目标 vsync 之前、上一 vsync 之后）。
+ *    Media3 的 60fps@90Hz 等滞回逻辑未移植。 */
+static int64_t sync_adjust_release(ms_hw_player *p, int64_t release_ns, int64_t pts_us,
+                                   double speed)
+{
+    int64_t adj = release_ns;
+    int64_t vt = 0, per = 0;
+    if (p->vfr_have && pts_us > p->vfr_last_pts_us) {
+        int64_t cand = p->vfr_last_adj_ns +
+                       (int64_t)((double)(pts_us - p->vfr_last_pts_us) * 1000.0 / speed);
+        int64_t diff = release_ns - cand;
+        if (diff < 0) {
+            diff = -diff;
+        }
+        if (diff <= MS_HW_VFR_MAX_ADJ_NS) {
+            adj = cand;
+        } else {
+            p->vfr_have = 0; /* resetAdjustment */
+        }
+    }
+    if (ms_hw_vsync_get(&vt, &per) && per > 0) {
+        int64_t cnt = (adj - vt) / per;
+        int64_t snapped = vt + per * cnt;
+        int64_t before, after;
+        if (adj <= snapped) {
+            before = snapped - per;
+            after = snapped;
+        } else {
+            before = snapped;
+            after = snapped + per;
+        }
+        snapped = (after - adj < adj - before) ? after : before;
+        return snapped - (per * MS_HW_VSYNC_OFFSET_PCT) / 100;
+    }
+    return adj;
+}
+
+/*
+ * 出帧决策：对齐 Media3 VideoFrameReleaseControl.getFrameReleaseActionInternal +
+ * MediaCodecVideoRenderer 的 FrameTimingEvaluator。顺序与 Media3 一致：
+ *   强制释放（首帧 / 迟到且 >100ms 没出过帧）→ 计算 releaseTimeNs 与 VSYNC 吸附 →
+ *   严重落后丢到关键帧 → 迟到丢帧 → 超前 >50ms 稍后 → 定时释放。
+ * 保留既有行为：首帧不等音频；暂停时只在需要出“当前帧”（首帧/Surface 重绑）时出一帧，否则握住；
+ * 无音频钟（无音轨/音频不支持/关声/尚未出声）时直接出帧。
+ */
+static ms_hw_release_action sync_release_decide(void *ctx, int64_t pts_us, int is_eos,
+                                                int can_schedule, int64_t *release_ns)
+{
+    ms_hw_player *p = (ms_hw_player *)ctx;
+    int64_t clock = 0;
+    int64_t now_ns;
+    int64_t early_us;
+    double speed = 1.0;
+    if (p == NULL) {
+        return MS_HW_REL_NOW;
+    }
+    now_ns = sync_mono_ns();
+    if (!p->first_video_presented) {
+        /* Media3 FIRST_FRAME_NOT_RENDERED：强制立即释放；同轮内防重复首帧。 */
+        p->first_video_presented = 1;
+        p->sync_holding = 0;
+        p->sync_last_release_ns = now_ns;
+        p->vfr_have = 0;
+        return MS_HW_REL_NOW;
+    }
+    if (p->paused) {
+        p->sync_holding = 1; /* 暂停：已有画面，不再推进 */
+        return MS_HW_REL_LATER;
+    }
+    if (!audio_clock_now(p, &clock)) {
+        p->sync_holding = 0;
+        p->sync_last_release_ns = now_ns;
+        return MS_HW_REL_NOW;
+    }
+    if (p->rate_num > 0 && p->rate_den > 0) {
+        speed = (double)p->rate_num / (double)p->rate_den;
+    }
+    /* calculateEarlyTimeUs：(帧时间 - 播放位置) / 速度；clock 在本函数内刚取，无需扣循环耗时。 */
+    early_us = (int64_t)((double)(pts_us - clock) / speed);
+    p->sync_last_early_us = early_us;
+    /* shouldForceRelease（FIRST_FRAME_RENDERED 分支）→ shouldForceRenderOutputBuffer */
+    if (early_us < -MS_HW_SYNC_LATE_US &&
+        now_ns - p->sync_last_release_ns > (int64_t)MS_HW_SYNC_FORCE_GAP_US * 1000ll) {
+        p->video_au_late++;
+        p->sync_holding = 0;
+        p->sync_last_release_ns = now_ns;
+        p->vfr_have = 0;
+        return MS_HW_REL_NOW;
+    }
+    if (can_schedule) {
+        int64_t rel = sync_adjust_release(p, now_ns + early_us * 1000ll, pts_us, speed);
+        early_us = (rel - now_ns) / 1000ll;
+        *release_ns = rel;
+    }
+    if (!is_eos && early_us < -MS_HW_SYNC_VERY_LATE_US) {
+        /* shouldDropBuffersToKeyframe：Media3 跳过源到下一关键帧并 flush 解码器。
+         * 解码器回调里不能 flush 自己，置位后由 ms_hw_player_drive 处理。 */
+        p->sync_drop_to_key = 1;
+        p->video_au_dropped_late++;
+        p->sync_holding = 0;
+        return MS_HW_REL_DROP;
+    }
+    if (!is_eos && early_us < -MS_HW_SYNC_LATE_US) {
+        p->video_au_dropped_late++; /* shouldDropOutputBuffer：不渲染直接还给解码器 */
+        p->sync_holding = 0;
+        return MS_HW_REL_DROP;
+    }
+    if (early_us > (can_schedule ? MS_HW_SYNC_EARLY_US : MS_HW_SYNC_LEGACY_EARLY_US)) {
+        if (pts_us != p->sync_last_held_pts) {
+            p->video_au_held++; /* 每个缓冲只计一次，不按轮询次数计 */
+            p->sync_last_held_pts = pts_us;
+        }
+        p->sync_holding = 1;
+        return MS_HW_REL_LATER;
+    }
+    p->sync_holding = 0;
+    p->sync_last_release_ns = now_ns;
+    if (can_schedule) {
+        p->vfr_last_adj_ns = *release_ns;
+        p->vfr_last_pts_us = pts_us;
+        p->vfr_have = 1;
+        p->video_release_scheduled++;
+        return MS_HW_REL_AT;
+    }
+    return MS_HW_REL_NOW;
+}
+#endif
+
 static void present_video(ms_hw_player *p, int late)
 {
     mark_stage_and_req(p, &p->t_first_output_us, &p->have_first_output,
@@ -2317,6 +2523,18 @@ static void drain_vpend(ms_hw_player *p)
     int have_clock = audio_clock_now(p, &clock);
     unsigned i;
     p->sync_fallback_no_audio = (!have_clock && (p->audio == NULL || p->audio_unsupported || !p->enable_audio));
+    if (p->sync_in_decoder) {
+        /* 时机已由 sync_release_decide 在 releaseOutputBuffer 前决定，这里只记账。 */
+        for (i = 0; i < 8; i++) {
+            if (p->vpend[i].occupied) {
+                present_video_pts(p, 0, p->vpend[i].has_pts ? p->vpend[i].pts_us : 0,
+                                  p->vpend[i].has_pts);
+                p->vpend[i].occupied = 0;
+                p->vpend_n--;
+            }
+        }
+        return;
+    }
     for (i = 0; i < 8; i++) {
         int late = 0;
         int64_t pts;
@@ -2419,10 +2637,51 @@ ms_status ms_hw_player_drive(ms_hw_player *p)
         }
     }
     drain_vpend(p);
+    if (p->sync_drop_to_key && p->dec != NULL) {
+        /* Media3 maybeDropBuffersToKeyframe：严重落后（<-500ms）时 flush 解码器并等下一个关键帧。 */
+        p->sync_drop_to_key = 0;
+        (void)ms_hw_decoder_flush(p->dec);
+        clear_vpend(p);
+        sync_reset(p);
+        p->waiting_key = 1;
+        p->video_drop_to_keyframe++;
+    }
+#ifdef __ANDROID__
+    /* 每 5s 一行同步统计到 logcat（tag MsSync），供模拟器/真机核对；不打印 URL。 */
+    if (p->sync_in_decoder && !p->paused) {
+        int64_t now = sync_mono_ns();
+        if (p->sync_log_ns == 0) {
+            p->sync_log_ns = now;
+        } else if (now - p->sync_log_ns >= 5000000000ll) {
+            int64_t clk = 0, lat = 0, vt = 0, per = 0;
+            int src = 0;
+            int hc = audio_clock_now(p, &clk);
+            if (p->audio != NULL) {
+                ms_hw_audio_sync_info(p->audio, &src, &lat);
+            }
+            if (p->vsync_acquired) {
+                (void)ms_hw_vsync_get(&vt, &per);
+            }
+            p->sync_log_ns = now;
+            __android_log_print(ANDROID_LOG_INFO, "MsSync",
+                                "av_sync_delta_us=%lld early_us=%lld clock_src=%d latency_us=%lld "
+                                "vsync_ns=%lld held=%llu dropped_late=%llu forced_late=%llu "
+                                "drop_to_key=%llu scheduled=%llu",
+                                (long long)((hc && p->have_last_video_pts) ? p->last_video_pts_us - clk : 0),
+                                (long long)p->sync_last_early_us, src, (long long)lat, (long long)per,
+                                (unsigned long long)p->video_au_held,
+                                (unsigned long long)p->video_au_dropped_late,
+                                (unsigned long long)p->video_au_late,
+                                (unsigned long long)p->video_drop_to_keyframe,
+                                (unsigned long long)p->video_release_scheduled);
+        }
+    }
+#endif
     /* 首帧之后若解码器输入已满且 2s 无新输出，冲洗等待关键帧，避免 goldfish
-     * 卡死 8 个 pending 后整条推送停住。不是把软件解报成真机硬解。 */
+     * 卡死 8 个 pending 后整条推送停住。不是把软件解报成真机硬解。
+     * 解码器正按音频钟握着“太早”的帧时不算卡死（视频超前音频 >2s 也不能误冲）。 */
     if (!p->paused && p->first_video_presented && p->dec != NULL &&
-        p->last_video_output_ns > 0) {
+        p->last_video_output_ns > 0 && !p->sync_holding) {
         struct timespec ts;
         if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
             int64_t now = (int64_t)ts.tv_sec * 1000000000ll + (int64_t)ts.tv_nsec;
@@ -2509,6 +2768,7 @@ ms_status ms_hw_player_flush(ms_hw_player *p)
         }
     }
     clear_vpend(p);
+    sync_reset(p); /* flush 后解码器握着的 index 已失效 */
     p->have_last_video_pts = 0;
     p->last_video_pts_us = -1;
     clear_ps_pending(p);
@@ -2784,6 +3044,25 @@ ms_status ms_hw_player_get_stats(const ms_hw_player *p, ms_hw_player_stats *out)
     tmp.hdr = p->hdr;
     tmp.hdr.struct_size = sizeof(tmp.hdr);
     ms_hdr_classify(&tmp.hdr);
+    /* 阶段 8：Media3 对齐的同步统计（加法字段）。 */
+    tmp.sync_in_decoder = p->sync_in_decoder;
+    tmp.video_release_scheduled = p->video_release_scheduled;
+    tmp.video_drop_to_keyframe = p->video_drop_to_keyframe;
+    tmp.video_last_early_us = p->sync_last_early_us;
+    tmp.audio_clock_source = 0;
+    tmp.audio_latency_us = 0;
+    tmp.vsync_period_ns = 0;
+    if (p->audio != NULL) {
+        (void)ms_hw_audio_sync_info(p->audio, &tmp.audio_clock_source, &tmp.audio_latency_us);
+    }
+#ifdef __ANDROID__
+    {
+        int64_t vt = 0;
+        if (p->vsync_acquired) {
+            (void)ms_hw_vsync_get(&vt, &tmp.vsync_period_ns);
+        }
+    }
+#endif
     memcpy(out, &tmp, in_sz);
     out->struct_size = in_sz;
     return MS_OK;

@@ -28,6 +28,7 @@
 | AC-3/E-AC-3/DTS 透传与回落 | A（逻辑）/ C（出声） | `nativeSetAudioPassthrough`，不支持时回落软解；真实 HDMI 功放需真机 |
 | `MsHttpClient`：严格 TLS、DNS 覆盖/回调、SOCKS5（含认证/远端解析） | A | 宿主 netcore 测试；s6 新增：自签 HTTPS 被拦截（`open=-8`），带 CA 时 200，CA 对但主机名不符仍拦截；API 18 上严格校验访问 `https://www.google.com/` 返回 200（系统 CA 目录） |
 | 播放拉流 TLS 默认忽略证书、可切严格 | A | 宿主与 API 18/34：自签 HTTPS HLS、自签 HTTPS + AES-128 可播；`setPlaybackTlsVerify(true)` 时拦截 |
+| 音画同步对齐 Media3（音频主钟、getTimestamp、定时出帧 + VSYNC、迟到丢帧） | **已改（2026-11-24 阶段 8）** / C（口型） | 见第 7 节。宿主 `build.sh test` 与 s6 校验通过；API 34 模拟器（TCG、`-no-audio`）证实取钟/延迟/VSYNC 采样/强制释放/丢到关键帧路径在跑，但解码只有约 0.5–2 fps，追不上实时，定时释放（`scheduled`）路径未被触发；真机口型未验 |
 | HLS AES-128（显式 IV / 序号 IV） | A | 宿主 + API 18/34：`aes`、`aes_seq`、弱网 AES、seek AES、切台压力 AES 均通过 |
 | HLS SAMPLE-AES / DRM | B（刻意不做） | 遇到即停止预下载规划，交回 FFmpeg 原生路径（报不支持） |
 | Media3 风格 HLS 缓冲（4 水位 + 字节上限、滞回、首片边下边播、重缓冲门槛、重试、取消） | A | 见第 3 节 |
@@ -75,3 +76,35 @@
 6. 弱网（限速/丢包）下 HLS 卡顿次数与恢复时间，对比系统播放器。
 7. 低内存盒子（512 MB/1 GB）连续播放 4 小时，观察 RSS。
 8. 频繁换台（遥控器连按）200 次，无 ANR、无崩溃、无 fd 泄漏。
+
+## 7. 音画同步对齐 Media3（阶段 8，2026-11-24）
+
+核对源码：`androidx/media` main@`101e97c`（当日 `git ls-remote`），文件
+`AudioTrackPositionTracker.java`、`AudioTimestampPoller.java`、`VideoFrameReleaseControl.java`、
+`VideoFrameReleaseHelper.java`、`MediaCodecVideoRenderer.java`；API < 21 参照 ExoPlayer `release-v2`@`dd430f7`
+的 `MediaCodecVideoRenderer`。
+
+| 项 | Media3 值（源码常量） | 本实现 |
+| --- | --- | --- |
+| 迟到丢帧 | `MIN_EARLY_US_LATE_THRESHOLD = -30_000` | earlyUs < -30 ms 且非末帧：`releaseOutputBuffer(index, false)`，计 `video_au_dropped_late` |
+| 严重落后 | `MIN_EARLY_US_VERY_LATE_THRESHOLD = -500_000` | flush 解码器并等下一关键帧，计 `video_drop_to_keyframe`（Media3 还要求源里有可跳过的数据，此处简化为总是执行） |
+| 超前暂缓 | `DEFAULT_EARLY_SCHEDULING_THRESHOLD_US = 50_000` | earlyUs > 50 ms：输出缓冲留在解码器（最多 1 个），下轮再判，计 `video_au_held`（每缓冲计一次） |
+| 强制释放 | `shouldForceRenderOutputBuffer`：迟到且距上次释放 > 100_000 us | 同；计 `video_au_late` |
+| 定时出帧 | `releaseOutputBuffer(index, releaseTimeNs)` | API 21+ `AMediaCodec_releaseOutputBufferAtTime`（dlsym）；计 `video_release_scheduled` |
+| 帧节奏平滑 | `MAX_ALLOWED_ADJUSTMENT_NS = 20_000_000` | 同（用 PTS 差，无帧率估计器） |
+| VSYNC 吸附 | 最近 vsync − `VSYNC_OFFSET_PERCENTAGE = 80`% 周期；`VSYNC_SAMPLE_UPDATE_PERIOD_MS = 500` | 同；采样用常驻 ALooper 线程 + `AChoreographer`（API 24+，32 位需 API 29），周期由相邻两帧差量得；未移植 60fps@90Hz 滞回 |
+| 时间戳轮询 | `FAST 10 ms / SLOW 10 s / ERROR 500 ms`，`INITIALIZING 500 ms`，`WAIT_FOR_ADVANCE 2 s`，前进判定漂移 < 1 ms，合理性 ±5 s | 同，状态机逐条对应；API 18 不调用 `getTimestamp` |
+| head 平滑 | 10 个样本 / 30 ms，漂移 < 1 s 时限 ±10% 速度变化 | 同 |
+| 输出延迟 | 反射 `getLatency()`×1000 − 缓冲时长，每 500 ms，> 10 s 视为无效 | JNI 取隐藏方法 `getLatency`，失败永久关闭；仅 PCM；时间戳模式不扣 |
+| API < 21 | ExoPlayer 2.x：earlyUs < 30 ms 时，若 > 11 ms 先 sleep 到约 10 ms 再 render | 不在持锁线程 sleep：earlyUs > 11 ms 返回“稍后”，到点 `releaseOutputBuffer(index, true)` |
+
+保留的既有行为：首帧不等音频立即出（Media3 `FIRST_FRAME_NOT_RENDERED` 亦强制释放）；暂停时只在首帧 / Surface 重绑 / seek 后出当前帧，其余握住；
+无音频钟（无音轨、不支持、关声、尚未出声）直接出帧；AudioTrack 头 200 ms 不动仍走单调钟兜底（`audio_clock_source=4`）。
+mock / VAAPI（宿主）不走回调，`drain_vpend` 的阈值同步改为 50 / 30 ms。2 s 无输出冲洗在解码器握着“太早”帧时不触发。
+
+可观测：`ms_hw_player_stats` 新增 `sync_in_decoder`、`audio_clock_source`、`audio_latency_us`、`vsync_period_ns`、
+`video_release_scheduled`、`video_drop_to_keyframe`、`video_last_early_us`（结构体尾部加法，ABI 不变）；
+Android 上每 5 s 一行 logcat `MsSync`（不含 URL）。
+
+未验证（C 类）：真机口型（耳听/高速摄像）、`getTimestamp` 在真机上进入 TIMESTAMP_ADVANCING 的比例、`getLatency` 在 API 28+ 隐藏接口限制下的可用性（API 34 模拟器可取到，约 90 ms）、
+HDMI 直通（IEC61937）下的时钟、高刷新率（90/120 Hz）吸附效果、API 18–20 真机的“稍后再 render”节奏。
