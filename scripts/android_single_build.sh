@@ -87,7 +87,7 @@ SLIM_CORE_SPLIT="${SLIM_CORE_SPLIT:-1}"
 # 硬件播放 + JNI：与 android_hw_build.sh 的 SRCS 同一清单（ms_hw_android.c 另按 NDK/JNI 双编译）。
 HW_SRCS=(
   src/hw/ms_hw_name.c src/hw/ms_hw_csd.c src/hw/ms_hw.c src/hw/ms_hw_vaapi.c
-  src/hw/ms_hw_player.c src/hw/ms_hw_ass_bind.c src/hw/ms_hw_ai_bind.c src/hw/ms_hw_reap.c
+  src/hw/ms_hw_player.c src/hw/ms_media3_audio_clock.c src/hw/ms_media3_video_release.c src/hw/ms_hw_ass_bind.c src/hw/ms_hw_ai_bind.c src/hw/ms_hw_reap.c
   src/hw/ms_hw_audio.c src/hw/ms_hw_audio_trim.c src/hw/ms_hw_jni.c src/hw/ms_hw_api.c
   src/hw/ms_hw_mediandk.c src/hw/ms_hw_android_dispatch.c src/hw/ms_hw_player_jni.c
   src/hw/ms_hw_probe.c src/hw/ms_hw_passthrough.c

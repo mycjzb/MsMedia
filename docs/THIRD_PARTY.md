@@ -79,3 +79,19 @@ HTTP 不由 OpenSSL 提供。未把 libcurl 引入默认核心或可选网络库
 ## 2026-11-24 阶段 6：单 so 静态合入裁剪 OpenSSL 3.5.9
 
 路线 B 主力 `libmsplayer.so` 静态链接 `scripts/openssl_slim_build.sh` 构建的 OpenSSL 3.5.9（Apache-2.0，源码同上钉选，补丁 `scripts/openssl_slim_patch.py` 只去掉 default provider 的编码器/存储/KEM 算法表）。分发该 so 需附 OpenSSL 的 Apache-2.0 许可与 NOTICE，以及 FFmpeg 的 LGPL-2.1+ 声明与对应源码（或书面要约）。不使用 mbedTLS。
+
+
+## 2026-11-25：Media3（androidx/media）音画同步算法移植
+
+硬解播放路径的音频钟、出帧决策、VSYNC 吸附与帧率滞回按 `androidx/media` 仓库 `main@101e97c`（2026-11-24 核对）逐函数移植，对照表见 `docs/MEDIA3_SYNC_PORT.md`。
+
+| 项 | 记录 |
+| --- | --- |
+| 组件 | AndroidX Media3（原 ExoPlayer 后继）音画同步相关类 |
+| 来源 | https://github.com/androidx/media ，修订 `101e97c` |
+| 许可证 | Apache License 2.0（https://www.apache.org/licenses/LICENSE-2.0） |
+| 纳入方式 | 算法与状态机移植到本仓库 C/Java（`src/hw/ms_media3_*.c`、`android/hw/java/.../media3/`），不是二进制依赖，也不把 Media3 整库链入 |
+| 版权声明 | 各移植文件头保留 “Copyright (C) The Android Open Source Project” 与 Apache-2.0 声明；接线注释 by: Long <mycjzb@gmail.com> |
+| 与工程许可证 | 本仓库顶层为 LGPL-2.1。FSF 将 Apache-2.0 视为与 LGPL-2.1 **不兼容**；这不是法律意见，但分发合入本移植的二进制时存在兼容性风险，须自行评估。**未改**根目录 `LICENSE`。 |
+
+API 18–20 的 `releaseOutputBuffer` 睡眠路径另外对照 ExoPlayer `release-v2@dd430f7` 的 `renderOutputBuffer`（Media3 main 最低 API 21），许可同为 Apache-2.0。

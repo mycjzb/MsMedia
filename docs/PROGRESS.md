@@ -3535,3 +3535,14 @@ by: Long <mycjzb@gmail.com>。细节与阈值出处见 `docs/DESIGN_AUDIT.md` �
 - API 34 模拟器（TCG、`-accel off`、`-no-audio`）：VSYNC 周期采到 16666666 ns，`getLatency` 扣除后约 90 ms，钟源在平滑 head（2）与停滞兜底（4）间切换，未进入 getTimestamp（模拟器无音频输出）。解码极慢：160x90@25fps 样片 SurfaceFlinger 实测约 1.5 fps（阶段 7 包同条件约 2.1 fps，两者都远低于实时），视频始终落后音频数秒到数十秒，所以只走到强制释放（每 >100 ms 出一帧）与丢到关键帧；超前握住、定时释放（`scheduled`）在模拟器上为 0，**未被触发**。选轨/字幕自测 1 轮 21 PASS / 3 FAIL（默认字幕选中态、内嵌字幕时间窗、取消字幕后 null 回调，与阶段 7 的时序类失败同类），无崩溃。
 - API 18 模拟器冒烟：装包、prepared 838 ms，无 VerifyError / UnsatisfiedLinkError / 崩溃；首帧仍因该 AVD 的 OMX.google.h264 解码器环境问题超时（与之前一致），API 18 回退路径的实际出帧未验证。
 - 未验证：真机口型同步、真机上 getTimestamp/getLatency 行为、定时释放 + VSYNC 吸附的实际效果、高刷屏、直通音频下的时钟。
+
+
+## 2026-11-25 09:30 CST（Asia/Shanghai）：忠实移植 Media3 音画同步（main@101e97c）
+
+用户实测 a8bb38f 反馈「完全不是抄 Media3」。本轮按 androidx/media `main@101e97c` 先写 `docs/MEDIA3_SYNC_PORT.md` 逐函数对照表，再按表移植，去掉上次自创简化。
+
+- 新模块：`src/hw/ms_media3_*.c` / `ms_media3.h`（AudioTimestampPoller 全状态机、AudioTrackPositionTracker、DefaultAudioSink 位置换算、DefaultMediaClock/StandaloneMediaClock、FixedFrameRateEstimator、VideoFrameReleaseHelper 含 60fps@90Hz 滞回、VideoFrameReleaseControl 全分支、maybeDrop 仅当 skipSource!=0 才 flush）。Java：`VSyncSampler` / `VSyncSamplerV33`（Choreographer + Display 刷新率，不再用回调帧差估算）。
+- 删除：200ms 墙钟兜底当主钟、very-late 一律 flush、ALooper 帧差 VSYNC、发明的 at_* 算法状态。
+- 许可：`docs/THIRD_PARTY.md` 与文件头注明 Apache-2.0；**未改** `LICENSE`。FSF 认为 Apache-2.0 与工程 LGPL-2.1 不兼容，存在分发风险。
+- 测试：`build.sh test` 通过（含 `test_media3_sync`）；`single_s6_verify.sh` 4 ABI ALL PASS，导出仍 68；API34 1fps 样片：VSYNC=16.67ms 已采样，held 路径触发，drop_to_key=0；选轨自测 26 PASS / 2 FAIL，「默认字幕选中」仍失败（与 a8bb38f 同类，非本轮同步引入）。API18 冒烟：装包成功，MsMedia 首帧仍 15s 超时（OMX.google.h264 AVD，与此前一致）。
+- 帧率 2.1→1.5 结论：根因是 very-late 一律 flush 关键帧 + 预滚期 200ms 墙钟把位置推到十几秒，首帧（goldfish 约 12–15s）之后帧全部 very-late 并反复冲解码器。忠实 maybeDrop（skipSource==0 不 flush）且去掉墙钟主钟后，本轮 1fps 回放 drop_to_key 保持 0。

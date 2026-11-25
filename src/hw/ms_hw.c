@@ -87,6 +87,23 @@ void ms_hw_consume_slot(ms_hw_decoder *d, unsigned i)
     d->stats.pending_in_bytes = d->in_bytes;
 }
 
+/* 对应 MediaCodecRenderer.skipSource：只跳过尚未 queue 到编解码器的输入。 */
+int ms_hw_decoder_skip_source(ms_hw_decoder *d, int64_t positionUs)
+{
+    unsigned i;
+    int n = 0;
+    if (d == NULL || d->in_slots == NULL) {
+        return 0;
+    }
+    for (i = 0; i < d->in_cap; i++) {
+        if (d->in_slots[i].occupied && d->in_slots[i].pts < positionUs) {
+            ms_hw_consume_slot(d, i);
+            n++;
+        }
+    }
+    return n;
+}
+
 void ms_hw_set_detail(ms_hw_decoder *d, const char *s)
 {
     size_t n;

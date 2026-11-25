@@ -18,3 +18,7 @@
 -keep public class com.mycjzb.media.player.TimedText { public *; }
 -keep public class com.mycjzb.media.player.MsHttpClient { public *; }
 -keep public class com.mycjzb.media.player.MsHttpClient$* { public *; }
+
+# 原生层 FindClass 调用的 VSYNC 采样器（不得混淆）
+-keep class com.mycjzb.media.player.media3.VSyncSampler { *; }
+-keep class com.mycjzb.media.player.media3.VSyncSamplerV33 { *; }

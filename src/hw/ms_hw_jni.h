@@ -59,3 +59,6 @@ void ms_hw_jni_codec_close(ms_hw_decoder *d);
 
 #endif /* __ANDROID__ */
 #endif
+
+/* 在 JNI_OnLoad 里缓存 VSyncSampler，避免解码线程 FindClass 找不到应用类。 */
+void ms_hw_vsync_jni_onload(JNIEnv *env);

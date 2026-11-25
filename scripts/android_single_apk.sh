@@ -52,6 +52,7 @@ sed -e "s/@PKG@/$PKG/" -e "s/@LABEL@/$LABEL/" "$ROOT/android/single/AndroidManif
 J="$ROOT/android/hw/java/com/mycjzb/media/player"
 "$JDK/bin/javac" --release 11 -nowarn -encoding UTF-8 -cp "$ANDROID_JAR" -d "$OUT/work/classes" \
   "$J/MediaPlayer.java" "$J/TimedText.java" "$J/MsNativeLoader.java" "$J/MsSystemTls.java" "$J/MsHttpClient.java" \
+  "$J/media3/VSyncSampler.java" "$J/media3/VSyncSamplerV33.java" \
   "$ROOT/android/single/java/com/mycjzb/media/player/demo/MsSpeedDemoActivity.java" "$ROOT/android/single/java/com/mycjzb/media/player/demo/MsTrackSelfTest.java" 2>&1 | grep -v "bootstrap classpath\|^1 warning\|^warning: \[options\]" || true
 python3 "$ROOT/scripts/strip_method_params.py" "$OUT/work/classes"
 # 以 jar 喂 d8（逐个 .class 传入时 d8 8.2 对 MediaPlayer$1 报内部 NPE）。

@@ -95,10 +95,15 @@ struct ms_hw_decoder {
 /* 音频钟来源与输出延迟（见 ms_hw_player_stats.audio_clock_source）。宿主恒为 0。 */
 void ms_hw_audio_sync_info(const ms_hw_audio *a, int *src, int64_t *latency_us);
 
+#include "ms_media3.h"
+/* 已接线的 DefaultAudioSink；未配置或宿主上为 NULL。 */
+DefaultAudioSink *ms_hw_audio_default_sink(ms_hw_audio *a);
+/* skipSource：丢掉尚未送入编解码器、pts < positionUs 的输入槽，返回个数。 */
+int ms_hw_decoder_skip_source(ms_hw_decoder *d, int64_t positionUs);
+
 #ifdef __ANDROID__
-/* VSYNC 采样（参照 Media3 VideoFrameReleaseHelper.VSyncSampler，精简版）：
- * 进程级一个 ALooper 线程 + AChoreographer（API 24+；32 位进程需 API 29 的 64 位回调）。
- * acquire/release 引用计数；不可用时 get 返回 0，调用方按未对齐处理。 */
+/* VSYNC 采样：调用 Java VSyncSampler（Choreographer + Display 刷新率，对照 Media3）。
+ * acquire/release 引用计数；不可用或尚未采到时 get 返回 0，调用方按未对齐处理。 */
 void ms_hw_vsync_acquire(void);
 void ms_hw_vsync_release(void);
 int ms_hw_vsync_get(int64_t *vsync_ns, int64_t *period_ns);

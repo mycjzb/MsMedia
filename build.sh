@@ -564,7 +564,7 @@ fi
 if [[ "$WANT_HW" -eq 1 ]]; then
   mkdir -p "$OUT/obj/hw" "$OUT/obj-pic/hw"
   HW_CFLAGS=("${cflags_common[@]}" -I"$ROOT/src/hw")
-  HW_SRCS=(src/hw/ms_hw_name.c src/hw/ms_hw_csd.c src/hw/ms_hw.c src/hw/ms_hw_mock.c src/hw/ms_hw_vaapi.c src/hw/ms_hw_player.c src/hw/ms_hw_ass_bind.c src/hw/ms_hw_ai_bind.c src/hw/ms_hw_reap.c src/hw/ms_hw_audio.c src/hw/ms_hw_audio_trim.c)
+  HW_SRCS=(src/hw/ms_hw_name.c src/hw/ms_hw_csd.c src/hw/ms_hw.c src/hw/ms_hw_mock.c src/hw/ms_hw_vaapi.c src/hw/ms_hw_player.c src/hw/ms_hw_ass_bind.c src/hw/ms_hw_ai_bind.c src/hw/ms_hw_reap.c src/hw/ms_hw_audio.c src/hw/ms_hw_audio_trim.c src/hw/ms_media3_audio_clock.c src/hw/ms_media3_video_release.c)
   hw_objs=()
   for src in "${HW_SRCS[@]}"; do
     obj="$OUT/obj/${src#src/}"
@@ -602,6 +602,15 @@ if [[ "$WANT_HW" -eq 1 ]]; then
   "$CC" "${cflags_common[@]}" "${SAN_LDFLAGS[@]+"${SAN_LDFLAGS[@]}"}" \
     -o "$TEST_HW" "$OUT/obj/tests/test_hw_backend.o" \
     "$OUT/obj/tests/test_hw_audio_trim.o" "$HW_A" "$LIB" -ldl
+  
+  TEST_MEDIA3_SYNC="$OUT/test_media3_sync"
+  "$CC" "${cflags_common[@]}" "${SAN_CFLAGS[@]+"${SAN_CFLAGS[@]}"}" \
+    -I"$ROOT/include" -I"$ROOT/src/hw" \
+    -c "$ROOT/tests/test_media3_sync.c" -o "$OUT/obj/tests/test_media3_sync.o"
+  "$CC" "${cflags_common[@]}" "${SAN_LDFLAGS[@]+"${SAN_LDFLAGS[@]}"}" \
+    -o "$TEST_MEDIA3_SYNC" "$OUT/obj/tests/test_media3_sync.o" \
+    "$OUT/obj/hw/ms_media3_audio_clock.o" "$OUT/obj/hw/ms_media3_video_release.o"
+
   TEST_HW_PLAYER="$OUT/test_hw_player"
   if [[ ! -f "$OUT/obj/tests/ms_ts_synth.o" ]]; then
     "$CC" "${cflags_common[@]}" "${SAN_CFLAGS[@]+"${SAN_CFLAGS[@]}"}" \
@@ -1007,6 +1016,8 @@ if [[ "$RUN_TEST" -eq 1 ]]; then
   if [[ "$HW_BUILT" -eq 1 ]]; then
     echo "running $TEST_HW"
     "$TEST_HW"
+    echo "running $OUT/test_media3_sync (Media3 A/V sync port, injected clock)"
+    "$OUT/test_media3_sync"
     echo "running $OUT/test_hw_player (mock state machine first)"
     "$OUT/test_hw_player"
     echo "running $OUT/test_hw_vaapi (parse+probe; not device decode)"

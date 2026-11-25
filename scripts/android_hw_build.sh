@@ -60,7 +60,9 @@ SRCS=(
   "$ROOT/src/hw/ms_hw_csd.c"
   "$ROOT/src/hw/ms_hw.c"
   "$ROOT/src/hw/ms_hw_vaapi.c"
-  "$ROOT/src/hw/ms_hw_player.c"
+  "$ROOT/src/hw/ms_hw_player.c" \
+  "$ROOT/src/hw/ms_media3_audio_clock.c" \
+  "$ROOT/src/hw/ms_media3_video_release.c"
   "$ROOT/src/hw/ms_hw_ass_bind.c"
   "$ROOT/src/hw/ms_hw_ai_bind.c"
   "$ROOT/src/hw/ms_hw_reap.c"
@@ -281,7 +283,7 @@ cp -f "$OUT/$SONAME" "$OUT/libmshw.unstripped.so"
 echo "android-hw: compiling JNI legacy I/O with API $API toolchain (-DMS_HW_LEGACY_JNI)"
 LEG_OBJS=()
 for s in "$ROOT/src/hw/ms_hw_name.c" "$ROOT/src/hw/ms_hw_csd.c" \
-         "$ROOT/src/hw/ms_hw.c" "$ROOT/src/hw/ms_hw_player.c" "$ROOT/src/hw/ms_hw_ass_bind.c" \
+         "$ROOT/src/hw/ms_hw.c" "$ROOT/src/hw/ms_hw_player.c" "$ROOT/src/hw/ms_media3_audio_clock.c" "$ROOT/src/hw/ms_media3_video_release.c" "$ROOT/src/hw/ms_hw_ass_bind.c" \
          "$ROOT/src/hw/ms_hw_audio.c" "$ROOT/src/hw/ms_hw_audio_trim.c" "$ROOT/src/hw/ms_hw_reap.c" \
          "$ROOT/src/hw/ms_hw_jni.c" "$ROOT/src/hw/ms_hw_android.c"; do
   o="$OUT/legacy/$(basename "${s%.c}").o"
