@@ -736,6 +736,29 @@ static ms_status feed_pending(ms_hw_decoder *d)
     return last;
 }
 
+/* 对应 ExoPlayer 2.x（release-v2）MediaCodecVideoRenderer.renderOutputBuffer：
+ * API < 21 无 releaseOutputBuffer(index, ns) 时，earlyUs 在 (11ms, 30ms] 睡眠后再 render。 */
+static void maybe_sleep_until_release(int64_t release_ns)
+{
+    struct timespec ts;
+    int64_t now_ns, early_us;
+    if (release_ns <= 0) {
+        return;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return;
+    }
+    now_ns = (int64_t)ts.tv_sec * 1000000000ll + (int64_t)ts.tv_nsec;
+    early_us = (release_ns - now_ns) / 1000ll;
+    if (early_us > 11000ll && early_us <= 30000ll) {
+        unsigned long ms = (unsigned long)((early_us - 10000ll) / 1000ll);
+        if (ms > 0) {
+            usleep((useconds_t)(ms * 1000ul));
+        }
+    }
+}
+
+
 ms_status ms_hw_android_drive(ms_hw_decoder *d)
 {
     ms_hw_and *p = d ? (ms_hw_and *)d->plat : NULL;
@@ -812,6 +835,7 @@ ms_status ms_hw_android_drive(ms_hw_decoder *d)
 have_output:
     /* Surface：render=true 且不回读像素。无窗口：拷一帧后 render=false，供测试取证。
      * 有出帧回调时按 Media3 VideoFrameReleaseControl 决定：立即/定时/丢弃/稍后。 */
+
     if (p->window && d->release_fn) {
         int64_t rel_ns = 0;
         int is_eos = (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
@@ -837,9 +861,12 @@ have_output:
                 ms_hw_set_detail(d, "releaseOutputBufferAtTime failed");
                 return MS_ERR_UNKNOWN;
             }
-        } else if (AMediaCodec_releaseOutputBuffer(p->codec, (size_t)idx, 1) != AMEDIA_OK) {
-            ms_hw_set_detail(d, "releaseOutputBuffer failed");
-            return MS_ERR_UNKNOWN;
+        } else {
+            maybe_sleep_until_release(rel_ns);
+            if (AMediaCodec_releaseOutputBuffer(p->codec, (size_t)idx, 1) != AMEDIA_OK) {
+                ms_hw_set_detail(d, "releaseOutputBuffer failed");
+                return MS_ERR_UNKNOWN;
+            }
         }
     } else if (!p->window) {
         size_t cap = 0;

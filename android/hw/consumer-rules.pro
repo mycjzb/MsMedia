@@ -20,3 +20,7 @@
 -keep public class com.mycjzb.media.player.MsAspectLayout { public *; }
 -keep public class com.mycjzb.media.player.n.a { public *; }
 -keep public class com.mycjzb.media.player.n.b { public *; }
+
+# 原生层 FindClass 调用的 VSYNC 采样器（不得混淆）
+-keep class com.mycjzb.media.player.media3.VSyncSampler { *; }
+-keep class com.mycjzb.media.player.media3.VSyncSamplerV33 { *; }

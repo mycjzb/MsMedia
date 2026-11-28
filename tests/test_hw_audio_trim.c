@@ -1379,15 +1379,16 @@ static int via_clock_fallback_is_monotonic(void)
                 ms_hw_audio_destroy(a);
                 return -1;
             }
-            if (c1 < c0 + 400000) {
+            /* Media3 不以 200ms 墙钟兜底当前主钟：头停转时位置停在已发出/估算值。 */
+            if (c1 > c0 + 100000) {
                 ms_hw_audio_debug_clock_info(a, &paused, &quota, &mono, &last_raw,
                                              &last_chg, &emitted, &origin);
                 fprintf(stderr,
-                        "  fallback did not advance c0=%lld c1=%lld paused=%d quota=%d "
+                        "  stall wall-advanced main clock c0=%lld c1=%lld paused=%d quota=%d "
                         "mono=%lld last_chg=%lld origin=%lld\n",
                         (long long)c0, (long long)c1, paused, quota,
                         (long long)mono, (long long)last_chg, (long long)origin);
-                fail_msg("fallback should advance");
+                fail_msg("stalled head must not wall-advance main clock");
                 ms_hw_audio_destroy(a);
                 return -1;
             }
@@ -1419,7 +1420,7 @@ static int via_clock_fallback_is_monotonic(void)
         return -1;
     }
     ms_hw_audio_destroy(a);
-    printf("  via_clock_fallback_is_monotonic ok c0=%lld c1=%lld c2=%lld c3=%lld\n",
+    printf("  via_clock_hold_is_monotonic ok (no wall fallback) c0=%lld c1=%lld c2=%lld c3=%lld\n",
            (long long)c0, (long long)c1, (long long)c2, (long long)c3);
     return 0;
 }

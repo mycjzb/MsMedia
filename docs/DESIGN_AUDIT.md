@@ -108,3 +108,8 @@ Android 上每 5 s 一行 logcat `MsSync`（不含 URL）。
 
 未验证（C 类）：真机口型（耳听/高速摄像）、`getTimestamp` 在真机上进入 TIMESTAMP_ADVANCING 的比例、`getLatency` 在 API 28+ 隐藏接口限制下的可用性（API 34 模拟器可取到，约 90 ms）、
 HDMI 直通（IEC61937）下的时钟、高刷新率（90/120 Hz）吸附效果、API 18–20 真机的“稍后再 render”节奏。
+
+
+2026-11-25：音画同步改为按 androidx/media main@101e97c 逐函数移植（见 `docs/MEDIA3_SYNC_PORT.md`）。
+仍未在真机验证口型同步、TIMESTAMP_ADVANCING 占比、HDMI 直通钟、高刷滞回实机效果。
+模拟器 -no-audio 下音频头几乎不走，scheduled（提前 ≤50ms 定时释放）窗口很难命中；held 与 VSYNC 采样已在 API34 触发。

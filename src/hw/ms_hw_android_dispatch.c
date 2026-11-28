@@ -90,194 +90,118 @@ ms_status ms_hw_android_copy_last_output(ms_hw_decoder *d,
 }
 
 /*
- * VSYNC 采样：精简移植 Media3 VideoFrameReleaseHelper.VSyncSampler。
- * Media3 在独立 HandlerThread 上用 Choreographer 每 VSYNC_SAMPLE_UPDATE_PERIOD_MS=500ms
- * 采一次 vsync 时间，刷新周期取 Display.getRefreshRate。这里无 Java 侧，改为：
- *   - 进程级一个 ALooper 线程 + AChoreographer（API 24+，dlsym 取）；
- *   - 每 500ms 采一帧，紧接着再采下一帧，两帧差即刷新周期（跳帧时差值偏大，按 1.5 倍门限拒收，
- *     连续 4 次不符才接受，以适应刷新率真的变了）；
- *   - 32 位进程的 postFrameCallbackDelayed 回调参数是 long（32 位会截断纳秒），
- *     只用 API 29 的 postFrameCallbackDelayed64；64 位进程两者皆可。
- * 不可用（API 21–23 或符号缺失）时 get 返回 0，出帧只做 releaseTimeNs 定时，不做 VSYNC 吸附。
- * 线程常驻（引用计数归零只停止重投回调），避免在 Choreographer 仍有挂起回调时拆 Looper。
- * by: Long <mycjzb@gmail.com>
+ * VSYNC 采样：调用 Java VSyncSampler（Choreographer + Display.getRefreshRate，
+ * API 33+ 另用 VSyncSamplerV33 读 FrameTimeline）。对应 Media3
+ * VideoFrameReleaseHelper.VSyncSampler / DisplayHelper。
+ * 不在此用相邻回调帧差估算刷新率（那是上次简化，已废弃）。
+ * 来源 androidx/media main@101e97c，Apache-2.0。接线 by: Long <mycjzb@gmail.com>
  */
-#include <android/looper.h>
-#include <dlfcn.h>
-#include <pthread.h>
+#include "ms_hw_jni.h"
+#include <jni.h>
 #include <stdint.h>
+#include <limits.h>
 
-#define MS_VSYNC_SAMPLE_MS 500 /* Media3 VSYNC_SAMPLE_UPDATE_PERIOD_MS */
-
-typedef struct AChoreographer AChoreographer;
-typedef void (*ms_ac_cb_long)(long frame_time_ns, void *data);
-typedef void (*ms_ac_cb_64)(int64_t frame_time_ns, void *data);
-typedef AChoreographer *(*ms_ac_get_fn)(void);
-typedef void (*ms_ac_post_long_fn)(AChoreographer *, ms_ac_cb_long, void *, long);
-typedef void (*ms_ac_post_64_fn)(AChoreographer *, ms_ac_cb_64, void *, uint32_t);
-
-static pthread_mutex_t g_vs_mu = PTHREAD_MUTEX_INITIALIZER;
+static jclass g_vs_cl;
+static jmethodID g_vs_start, g_vs_stop, g_vs_time, g_vs_dur;
 static int g_vs_refs;
-static int g_vs_started;
-static int g_vs_posted;
-static int g_vs_measure;    /* 1=下一次回调用于量周期 */
-static int g_vs_reject;
-static int64_t g_vs_prev_ns;
-static int64_t g_vs_time_ns;
-static int64_t g_vs_period_ns;
-static ALooper *g_vs_looper;
-static AChoreographer *g_vs_ch;
-static ms_ac_get_fn g_vs_get;
-static ms_ac_post_long_fn g_vs_post_long;
-static ms_ac_post_64_fn g_vs_post_64;
 
-static void vs_post_locked(long delay_ms);
-
-static void vs_on_frame(int64_t t)
+static int vs_resolve(JNIEnv *env)
 {
-    pthread_mutex_lock(&g_vs_mu);
-    g_vs_posted = 0;
-    if (g_vs_measure && g_vs_prev_ns > 0 && t > g_vs_prev_ns) {
-        int64_t d = t - g_vs_prev_ns;
-        if (d >= 4000000ll && d <= 50000000ll) {
-            if (g_vs_period_ns == 0 || d <= g_vs_period_ns * 3 / 2 || ++g_vs_reject >= 4) {
-                g_vs_period_ns = d;
-                g_vs_reject = 0;
-            }
-        }
-    }
-    g_vs_time_ns = t;
-    g_vs_prev_ns = t;
-    if (g_vs_refs > 0) {
-        /* 交替：量周期用的紧邻帧（0ms），然后间隔 500ms 再采。 */
-        g_vs_measure = !g_vs_measure;
-        vs_post_locked(g_vs_measure ? 0 : MS_VSYNC_SAMPLE_MS);
-    } else {
-        g_vs_measure = 0;
-        g_vs_prev_ns = 0;
-    }
-    pthread_mutex_unlock(&g_vs_mu);
-}
-
-static void vs_cb_long(long t, void *data)
-{
-    (void)data;
-    vs_on_frame((int64_t)t);
-}
-
-static void vs_cb_64(int64_t t, void *data)
-{
-    (void)data;
-    vs_on_frame(t);
-}
-
-static void vs_post_locked(long delay_ms)
-{
-    if (g_vs_ch == NULL || g_vs_posted) {
-        return;
-    }
-    if (g_vs_post_64 != NULL) {
-        g_vs_post_64(g_vs_ch, vs_cb_64, NULL, (uint32_t)delay_ms);
-    } else if (g_vs_post_long != NULL) {
-        g_vs_post_long(g_vs_ch, vs_cb_long, NULL, delay_ms);
-    } else {
-        return;
-    }
-    g_vs_posted = 1;
-}
-
-static void *vs_thread(void *arg)
-{
-    ALooper *lp;
-    (void)arg;
-    lp = ALooper_prepare(0);
-    if (lp == NULL) {
-        return NULL;
-    }
-    ALooper_acquire(lp);
-    pthread_mutex_lock(&g_vs_mu);
-    g_vs_looper = lp;
-    g_vs_ch = g_vs_get();
-    pthread_mutex_unlock(&g_vs_mu);
-    for (;;) {
-        pthread_mutex_lock(&g_vs_mu);
-        if (g_vs_refs > 0 && !g_vs_posted) {
-            g_vs_measure = 0;
-            g_vs_prev_ns = 0;
-            vs_post_locked(0);
-        }
-        pthread_mutex_unlock(&g_vs_mu);
-        (void)ALooper_pollOnce(-1, NULL, NULL, NULL);
-    }
-    return NULL;
-}
-
-static int vs_load_locked(void)
-{
-    void *h;
-    if (g_vs_get != NULL) {
+    jclass cl;
+    if (g_vs_cl != NULL && g_vs_start != NULL && g_vs_stop != NULL &&
+        g_vs_time != NULL && g_vs_dur != NULL) {
         return 1;
     }
-    h = dlopen("libandroid.so", RTLD_NOW);
-    if (h == NULL) {
+    cl = (*env)->FindClass(env, "com/mycjzb/media/player/media3/VSyncSampler");
+    if (cl == NULL) {
+        (*env)->ExceptionClear(env);
         return 0;
     }
-    g_vs_post_64 = (ms_ac_post_64_fn)dlsym(h, "AChoreographer_postFrameCallbackDelayed64");
-    if (sizeof(long) >= 8) {
-        g_vs_post_long = (ms_ac_post_long_fn)dlsym(h, "AChoreographer_postFrameCallbackDelayed");
-    }
-    if (g_vs_post_64 == NULL && g_vs_post_long == NULL) {
+    g_vs_cl = (*env)->NewGlobalRef(env, cl);
+    (*env)->DeleteLocalRef(env, cl);
+    if (g_vs_cl == NULL) {
         return 0;
     }
-    g_vs_get = (ms_ac_get_fn)dlsym(h, "AChoreographer_getInstance");
-    return g_vs_get != NULL;
+    g_vs_start = (*env)->GetStaticMethodID(env, g_vs_cl, "start", "()V");
+    g_vs_stop = (*env)->GetStaticMethodID(env, g_vs_cl, "stop", "()V");
+    g_vs_time = (*env)->GetStaticMethodID(env, g_vs_cl, "sampledVsyncTimeNs", "()J");
+    g_vs_dur = (*env)->GetStaticMethodID(env, g_vs_cl, "vsyncDurationNs", "()J");
+    if ((*env)->ExceptionCheck(env) || !g_vs_start || !g_vs_stop || !g_vs_time || !g_vs_dur) {
+        (*env)->ExceptionClear(env);
+        g_vs_start = g_vs_stop = g_vs_time = g_vs_dur = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+void ms_hw_vsync_jni_onload(JNIEnv *env)
+{
+    /* JNI_OnLoad 时 ClassLoader 正确，在此缓存类与方法。 */
+    (void)vs_resolve(env);
 }
 
 void ms_hw_vsync_acquire(void)
 {
-    pthread_mutex_lock(&g_vs_mu);
-    g_vs_refs++;
-    if (!g_vs_started) {
-        g_vs_started = 1; /* 只尝试一次；失败则永久按“无 VSYNC”处理 */
-        if (vs_load_locked()) {
-            pthread_t th;
-            pthread_attr_t at;
-            pthread_attr_init(&at);
-            pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-            if (pthread_create(&th, &at, vs_thread, NULL) != 0) {
-                g_vs_get = NULL;
-            }
-            pthread_attr_destroy(&at);
-        }
-    } else if (g_vs_looper != NULL) {
-        ALooper_wake(g_vs_looper); /* 让常驻线程重新投递回调 */
+    JNIEnv *env = NULL;
+    if (!ms_hw_jni_env(&env) || env == NULL || !vs_resolve(env)) {
+        return;
     }
-    pthread_mutex_unlock(&g_vs_mu);
+    g_vs_refs++;
+    (*env)->CallStaticVoidMethod(env, g_vs_cl, g_vs_start);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        if (g_vs_refs > 0) {
+            g_vs_refs--;
+        }
+    }
 }
 
 void ms_hw_vsync_release(void)
 {
-    pthread_mutex_lock(&g_vs_mu);
+    JNIEnv *env = NULL;
     if (g_vs_refs > 0) {
         g_vs_refs--;
     }
-    if (g_vs_refs == 0) {
-        g_vs_time_ns = 0; /* 停采后旧值不再可信 */
+    if (!ms_hw_jni_env(&env) || env == NULL || !vs_resolve(env)) {
+        return;
     }
-    pthread_mutex_unlock(&g_vs_mu);
+    (*env)->CallStaticVoidMethod(env, g_vs_cl, g_vs_stop);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
 }
 
 int ms_hw_vsync_get(int64_t *vsync_ns, int64_t *period_ns)
 {
-    int ok;
-    pthread_mutex_lock(&g_vs_mu);
-    ok = (g_vs_refs > 0 && g_vs_time_ns > 0 && g_vs_period_ns > 0);
-    if (ok) {
-        *vsync_ns = g_vs_time_ns;
-        *period_ns = g_vs_period_ns;
+    JNIEnv *env = NULL;
+    int64_t t, d;
+    if (vsync_ns == NULL || period_ns == NULL) {
+        return 0;
     }
-    pthread_mutex_unlock(&g_vs_mu);
-    return ok;
+    if (g_vs_refs <= 0 || !ms_hw_jni_env(&env) || env == NULL || !vs_resolve(env)) {
+        return 0;
+    }
+    t = (int64_t)(*env)->CallStaticLongMethod(env, g_vs_cl, g_vs_time);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+    d = (int64_t)(*env)->CallStaticLongMethod(env, g_vs_cl, g_vs_dur);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+    /* VSyncSampler 用 TIME_UNSET 表示尚未采到时间戳。
+     * 刷新率尚未读到时按 60Hz 回退（与常见默认显示一致），仍做 VSYNC 吸附。 */
+    if (t == 0 || t == (INT64_MIN + 1)) {
+        return 0;
+    }
+    if (d <= 0 || d == (INT64_MIN + 1)) {
+        d = 16666666ll;
+    }
+    *vsync_ns = t;
+    *period_ns = d;
+    return 1;
 }
 
 #endif /* __ANDROID__ */

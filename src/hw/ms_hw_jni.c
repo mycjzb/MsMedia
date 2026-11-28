@@ -10,6 +10,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <time.h>
 #include <stdlib.h>
 #include <android/log.h>
 #include <pthread.h>
@@ -181,6 +183,7 @@ int ms_hw_jni_onload(JavaVM *vm)
             return -1;
     }
 #endif
+    ms_hw_vsync_jni_onload(env); /* 缓存 VSyncSampler，失败不阻止加载 */
     g_ready = 1;
     return 0;
 }
@@ -952,6 +955,29 @@ ms_status ms_hw_jni_codec_feed(ms_hw_decoder *d, unsigned slot)
     return MS_OK;
 }
 
+
+/* 对应 ExoPlayer 2.x renderOutputBuffer：API < 21 在 (11ms, 30ms] 睡眠后再 render。 */
+static void maybe_sleep_until_release(int64_t release_ns)
+{
+    struct timespec ts;
+    int64_t now_ns, early_us;
+    if (release_ns <= 0) {
+        return;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return;
+    }
+    now_ns = (int64_t)ts.tv_sec * 1000000000ll + (int64_t)ts.tv_nsec;
+    early_us = (release_ns - now_ns) / 1000ll;
+    if (early_us > 11000ll && early_us <= 30000ll) {
+        unsigned long ms = (unsigned long)((early_us - 10000ll) / 1000ll);
+        if (ms > 0) {
+            usleep((useconds_t)(ms * 1000ul));
+        }
+    }
+}
+
+
 ms_status ms_hw_jni_codec_drive(ms_hw_decoder *d)
 {
     JNIEnv *env = NULL;
@@ -1038,6 +1064,9 @@ have_output:
             jc->held_flags = flags;
             jc->held_pts = pts_v;
             return MS_AGAIN;
+        }
+        if (act != MS_HW_REL_DROP) {
+            maybe_sleep_until_release(rel_ns);
         }
         (*env)->CallVoidMethod(env, jc->codec, g_rel_out, idx,
                                act == MS_HW_REL_DROP ? JNI_FALSE : JNI_TRUE);
