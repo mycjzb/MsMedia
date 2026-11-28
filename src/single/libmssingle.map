@@ -1,16 +1,18 @@
 /*
- * 单 so（统一交付名 libmsplayer.so）导出表：只导出 JNI 入口。
- * 纯自研/精简 FFmpeg 单 so 都由 Java System.loadLibrary("msplayer") 加载，
- * 内部 ms_* / ms_hw_* / ms_ff_* 一律不进动态符号表，便于 --gc-sections 与 ICF 收缩。
- * 通配 Java_com_mycjzb_media_player_* 已覆盖新增 JNI 入口（阶段 7 选轨/字幕 4 个，共 67 个 Java_ + JNI_OnLoad），
- * 导出个数由 scripts/single_s6_verify.sh 逐个核对，新增入口必须同步更新该脚本。
- * 公共 C ABI v1（MSMEDIA_1.0）仍由原多 so 构建（build.sh / android_hw_build.sh）提供，本表不改其布局。
+ * 单 so（libmsplayer.so）导出表：只导出 Media3 / 协议 / JS / TEA JNI。
+ * 包名统一 com.mycjzb.media.player（勿再导出 msm3 旧前缀）。
  * by: Long <mycjzb@gmail.com>
  */
 MSMEDIA_SINGLE_1.0 {
   global:
     JNI_OnLoad;
-    Java_com_mycjzb_media_player_*;
+    Java_com_mycjzb_media_player_MsHttpClient_*;
+    Java_com_mycjzb_media_player_MsProbe_*;
+    Java_com_mycjzb_media_player_FfAdec_*;
+    Java_com_mycjzb_media_player_FfIo_*;
+    Java_com_mycjzb_media_player_MsTvbus_*;
+    Java_com_mycjzb_media_player_n_a_*;
+    Java_com_mycjzb_media_player_n_b_*;
   local:
     *;
 };

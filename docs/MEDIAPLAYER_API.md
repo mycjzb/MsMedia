@@ -1,6 +1,8 @@
-# com.mycjzb.media.player.MediaPlayer 封装设计（阶段 1）
+# com.mycjzb.media.player.MediaPlayer 封装设计（阶段 1 · 内部归档）
 
 by: Long <mycjzb@gmail.com>
+
+> **客户请使用 [SDK接入指南.md](SDK接入指南.md)。** 本文是早期设计笔记，可能过期。
 
 日期：2026-11-24 09:49 Asia/Shanghai。本文件只描述 API 与加载方式，**不是**设备出画 / 出声验收，也不改现有多 so Demo（`MsHwPlayerActivity`）和官方 `scripts/android_hw_build.sh`。
 

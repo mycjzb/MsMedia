@@ -8,7 +8,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-/home/box/.local/android-ndk-r29}}"
+source "$ROOT/scripts/android_env.sh"
+NDK="$MS_NDK"
 API="${ANDROID_API:-21}"
 PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 export ANDROID_NDK_ROOT="$NDK"

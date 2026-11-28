@@ -1,12 +1,9 @@
 /*
  * 与系统 android.media.MediaPlayer 对齐的公开封装：同名方法 / 重载 / 常量 / 监听器，
  * 便于业务把 import android.media.MediaPlayer 换成 com.mycjzb.media.player.MediaPlayer。
- * 底层只加载合并后的单个 libmsplayer.so（路线 A 纯自研 / 路线 B 精简 FFmpeg 产物同名，本类共用）。
- * 阶段 2：已接原生通道（prepare/start/pause/stop/reset/release/seek/位置/时长/音量/循环/
- * Surface/倍速/七个监听器）。对 Java 一律毫秒，90 kHz 只在原生层换算。
- * 阶段 7：补齐选轨与字幕（getTrackInfo / selectTrack / deselectTrack / getSelectedTrack /
- * OnTimedTextListener / addTimedTextSource），复用内核已有的选轨与 ms_sub 字幕实现。
- * 不能播放的输入（例如路线 A 的网络地址、带偏移的 fd、需要自定义请求头的地址）prepare 诚实失败。
+ * 底层：{@link PlayEngine#SHW} → Media3 源码内核（{@link M3PlayerBackend}）；
+ * {@link PlayEngine#SYSTEM} → 系统播放器。源级前缀 {@code shw:}/{@code sys:}；
+ * {@link PlayEngine#setDefault(int)} 改全局默认。协议/音频兜底 JNI 在 DataSource/FfAdec，不经本类 native 播控。
  * 不记录完整私有 URL。不是设备出画/出声验收。
  * by: Long <mycjzb@gmail.com>
  */
@@ -35,6 +32,7 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -42,6 +40,7 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.Charset;
+import java.util.HashMap;
 import java.util.Map;
 
 public class MediaPlayer {
@@ -120,14 +119,26 @@ public class MediaPlayer {
 
     private final Object lock = new Object();
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final long[] q = new long[Q_LEN];
-    private long nh; /* 原生句柄；0=未建/已释放 */
+    private final long[] q = new long[Q_LEN]; /* 遗留查询缓冲，SHW/Media3 不用 */
     private int state = S_IDLE;
 
-    private String dataSource;          /* 仅内部，不写入日志 */
+    private String dataSource;          /* 仅内部，已剥引擎前缀，不写入日志 */
     private boolean dataIsUrl;
     private ParcelFileDescriptor dataPfd; /* fd 数据源：dup 后持有，reset/release 关闭 */
-    private boolean headersUnsupported; /* 非空请求头：原生取流通道尚无请求头参数，prepare 诚实失败 */
+    private boolean headersUnsupported; /* 非空请求头：自研通道尚无请求头参数，prepare 诚实失败 */
+    /** 当前 dataSource 是 tvbus（sop:// / tvbus://）：release/reset 要停 P2P 会话。 */
+    private boolean tvbusActive;
+    private Map<String, String> dataHeaders; /* 系统档可带请求头；自研档非空则 headersUnsupported */
+    private int engine = PlayEngine.SHW; /* 本实例解析后的引擎 */
+    private SysPlayerBackend sys;        /* engine==SYSTEM 时非空 */
+    private ShwBackend shw;              /* SHW = Media3 */
+    /* 直播/点播：抄超级直播 MsPlay/Exo 时长滑动（m3u8/flv 一样按时长，不靠后缀） */
+    private Boolean liveHint;            /* null=自动 */
+    private int liveCached = -1;         /* -1 未定，0 点播，1 直播 */
+    private long liveFirstDurMs = -1;
+    private long liveLastDurMs = -1;
+    private boolean liveNotSeekable;
+    private String aspectMode = AspectMode.AUTO;
 
     private Surface surface;
     private SurfaceHolder display;
@@ -185,9 +196,11 @@ public class MediaPlayer {
     private final String[] trackStrs = new String[TRACK_MAX * TRACK_STRS];
     private final int[] cueMeta = new int[CUE_META];
     private TrackInfo[] lastTracks = new TrackInfo[0]; /* 原生忙时返回上次结果 */
-    private byte[] extSubData;    /* addTimedTextSource 读入的整个文件；每次 prepare 成功后重新交给原生 */
+    private byte[] extSubData;    /* 旧 native 路径残留字段；SHW 用 extSubPath */
     private int extSubFmt;
-    private boolean extSubApplied; /* 原生里是否还挂着外挂字幕（reset 后在下次 prepare 时清掉） */
+    private boolean extSubApplied;
+    private String extSubPath;    /* SHW Media3 外挂字幕路径/URI */
+    private String extSubMime;
     private String lastCueKey;     /* 上次派发的字幕（开始时间|轨|文字），null = 当前无字幕 */
     private boolean cueDirty;      /* 选轨变化后强制重新派发一次 */
     private String lastCueText;
@@ -205,25 +218,12 @@ public class MediaPlayer {
     };
 
     public MediaPlayer() {
-        if (MsNativeLoader.ensure()) {
-            try {
-                nh = nativeSetup();
-            } catch (UnsatisfiedLinkError e) {
-                nh = 0;
-            }
-        }
+        /* SHW=Media3；so 由 JniHttp/FfIo/FfAdec/MsProbe 按需加载 */
     }
 
-    /** 本 so 是否链入了精简 FFmpeg（路线 B）；路线 A 返回 false（网络地址 prepare 会诚实失败）。 */
+    /** 是否具备 FFmpeg 协议/音频兜底 so（msm3 DataSource 用）。 */
     public static boolean isFfmpegRoute() {
-        if (!MsNativeLoader.ensure()) {
-            return false;
-        }
-        try {
-            return nativeHasFf();
-        } catch (UnsatisfiedLinkError e) {
-            return false;
-        }
+        return MsNativeLoader.ensure();
     }
 
     /* ---------------- 工厂方法（对齐系统 create） ---------------- */
@@ -273,6 +273,131 @@ public class MediaPlayer {
         }
     }
 
+    /* ---------------- 引擎（全局默认 + 源级前缀） ---------------- */
+
+    /** 全局默认引擎：{@link PlayEngine#SHW} 或 {@link PlayEngine#SYSTEM}。只影响之后的 setDataSource。 */
+    public static void setDefaultEngine(int engine) {
+        PlayEngine.setDefault(engine);
+    }
+
+    public static int getDefaultEngine() {
+        return PlayEngine.getDefault();
+    }
+
+    /** 本实例当前引擎（setDataSource 解析后）。 */
+    public int getEngine() {
+        synchronized (lock) {
+            return engine;
+        }
+    }
+
+    /**
+     * 强制直播/点播；{@code null} 恢复自动判断。
+     * 目录已标明直播/点播时用，避免 HTTP 切片误判。
+     */
+    public void setLiveHint(Boolean live) {
+        synchronized (lock) {
+            checkNotReleased();
+            liveHint = live;
+            liveCached = -1;
+            liveFirstDurMs = -1;
+            liveLastDurMs = -1;
+        }
+    }
+
+    /**
+     * 是否直播（方便 seek）。<b>不另开连接</b>：Media3 用 Timeline live；
+     * 自研/系统用同一次打开后的 seekable/时长。URL 扩展名不参与本判定。
+     */
+    public boolean isLive() {
+        synchronized (lock) {
+            if (liveHint != null) return liveHint.booleanValue();
+            if (liveCached >= 0) return liveCached == 1;
+            if (state == S_IDLE || state == S_INITIALIZED || state == S_PREPARING
+                    || state == S_ERROR || state == S_END) {
+                return true;
+            }
+            if (isShwExtLocked() && shw != null) {
+                boolean live = shw.isLive();
+                liveCached = live ? 1 : 0;
+                return live;
+            }
+            if (liveNotSeekable) {
+                liveCached = 1;
+                return true;
+            }
+            long dur;
+            long pos;
+            int seekable = 1;
+            if (isSysLocked()) {
+                if (sys == null) return true;
+                dur = sys.getDuration();
+                pos = sys.getCurrentPosition();
+            } else {
+                return true;
+            }
+            /* 同一次打开后的结果：不可 seek ≈ 无 ENDLIST / live 窗 */
+            if (seekable == 0) {
+                liveCached = 1;
+                return true;
+            }
+            if (dur <= 0) return true;
+            if (liveFirstDurMs < 0) {
+                liveFirstDurMs = dur;
+                liveLastDurMs = dur;
+                return true;
+            }
+            if (Math.abs(dur - liveLastDurMs) > 500L
+                    || Math.abs(dur - liveFirstDurMs) > 1000L) {
+                liveCached = 1;
+                return true;
+            }
+            liveLastDurMs = dur;
+            if (pos > dur + 2000L) {
+                liveCached = 1;
+                return true;
+            }
+            liveCached = 0;
+            return false;
+        }
+    }
+
+    /** 点播（可按总时长 seek）。未锁成点播前为 false。 */
+    public boolean isVod() {
+        synchronized (lock) {
+            if (liveHint != null) return !liveHint.booleanValue();
+            if (liveCached < 0) {
+                isLive(); /* 推进一次采样 */
+            }
+            return liveCached == 0;
+        }
+    }
+
+    /**
+     * 画面比例字符串（对齐超级直播）：{@code auto}/{@code 16:9}/{@code 4:3}/{@code orig}/{@code fill}。
+     * 仅记录偏好；实际量算请用 {@link MsAspectLayout#setAspectMode(String)}。
+     */
+    public void setAspectMode(String ratio) {
+        synchronized (lock) {
+            checkNotReleased();
+            aspectMode = AspectMode.normalize(ratio);
+        }
+    }
+
+    public String getAspectMode() {
+        synchronized (lock) {
+            return aspectMode;
+        }
+    }
+
+    private void resetLiveDetectLocked() {
+        liveCached = -1;
+        liveFirstDurMs = -1;
+        liveLastDurMs = -1;
+        liveNotSeekable = false;
+        /* liveHint 保留：业务强制跨源有效，除非显式 setLiveHint(null) */
+    }
+
     /* ---------------- 数据源 ---------------- */
 
     public void setDataSource(String path) throws IOException {
@@ -283,12 +408,14 @@ public class MediaPlayer {
         if (path == null) {
             throw new IllegalArgumentException("path is null");
         }
-        Uri u = Uri.parse(path);
+        int eng = PlayEngine.resolve(path);
+        String raw = PlayEngine.strip(path);
+        Uri u = Uri.parse(raw);
         String scheme = u.getScheme();
         if (scheme == null || "file".equalsIgnoreCase(scheme)) {
-            setSourceInternal(scheme == null ? path : u.getPath(), false, headers);
+            setSourceInternal(scheme == null ? raw : u.getPath(), false, headers, eng);
         } else {
-            setSourceInternal(path, true, headers);
+            setSourceInternal(raw, true, headers, eng);
         }
     }
 
@@ -303,24 +430,31 @@ public class MediaPlayer {
         synchronized (lock) {
             appContext = context.getApplicationContext() != null ? context.getApplicationContext() : context;
         }
-        String scheme = uri.getScheme();
+        String as = uri.toString();
+        int eng = PlayEngine.resolve(as);
+        String stripped = PlayEngine.strip(as);
+        Uri u = Uri.parse(stripped);
+        String scheme = u.getScheme();
         if (scheme == null || "file".equalsIgnoreCase(scheme)) {
-            setSourceInternal(uri.getPath(), false, headers);
+            setSourceInternal(u.getPath() != null ? u.getPath() : stripped, false, headers, eng);
             return;
         }
         if (ContentResolver.SCHEME_CONTENT.equals(scheme) || ContentResolver.SCHEME_ANDROID_RESOURCE.equals(scheme)) {
-            AssetFileDescriptor afd = context.getContentResolver().openAssetFileDescriptor(uri, "r");
+            AssetFileDescriptor afd = context.getContentResolver().openAssetFileDescriptor(u, "r");
             if (afd == null) {
                 throw new IOException("cannot open content uri");
             }
             try {
                 setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getDeclaredLength());
+                synchronized (lock) {
+                    engine = eng; /* fd 路径默认引擎会被覆盖，保留 URI 上的强制前缀 */
+                }
             } finally {
                 afd.close();
             }
             return;
         }
-        setSourceInternal(uri.toString(), true, headers);
+        setSourceInternal(stripped, true, headers, eng);
     }
 
     public void setDataSource(AssetFileDescriptor afd) throws IOException {
@@ -344,29 +478,252 @@ public class MediaPlayer {
         }
         synchronized (lock) {
             requireState("setDataSource", S_IDLE);
+            releaseSysLocked();
+            releaseShwLocked();
             ParcelFileDescriptor pfd = ParcelFileDescriptor.dup(fd);
             closePfdLocked();
             dataPfd = pfd;
             dataSource = offset == 0 ? "/proc/self/fd/" + pfd.getFd() : null;
             dataIsUrl = false;
+            dataHeaders = null;
             headersUnsupported = false;
+            engine = PlayEngine.getDefault(); /* fd 无前缀，用全局默认 */
+            resetLiveDetectLocked();
             state = S_INITIALIZED;
         }
     }
 
-    private void setSourceInternal(String loc, boolean isUrl, Map<String, String> headers) {
+    private void setSourceInternal(String loc, boolean isUrl, Map<String, String> headers, int eng) {
         synchronized (lock) {
             requireState("setDataSource", S_IDLE);
             if (loc == null || loc.length() == 0) {
                 throw new IllegalArgumentException("empty data source");
             }
+            releaseSysLocked();
+            releaseShwLocked();
             closePfdLocked();
             dataSource = loc;
             dataIsUrl = isUrl;
-            headersUnsupported = headers != null && !headers.isEmpty();
+            engine = eng;
+            resetLiveDetectLocked();
+            if (headers != null && !headers.isEmpty()) {
+                dataHeaders = new HashMap<String, String>(headers);
+                headersUnsupported = false; /* Media3/系统均可带头；系统档走 Sys */
+            } else {
+                dataHeaders = null;
+                headersUnsupported = false;
+            }
             state = S_INITIALIZED;
         }
     }
+
+    private boolean isSysLocked() {
+        return engine == PlayEngine.SYSTEM;
+    }
+
+    private boolean isShwExtLocked() {
+        return engine == PlayEngine.SHW;
+    }
+
+    private void releaseSysLocked() {
+        if (sys != null) {
+            try {
+                sys.release();
+            } catch (Throwable ignored) {
+            }
+            sys = null;
+        }
+    }
+
+    private void releaseShwLocked() {
+        if (shw != null) {
+            try {
+                shw.release();
+            } catch (Throwable ignored) {
+            }
+            shw = null;
+        }
+        /* tvbus 会话：与 rtmp 一样，释放/换台即停。 */
+        stopTvbusLocked();
+    }
+
+    /** 停掉 tvbus P2P 会话（sop:// / tvbus://）。非 tvbus 播放时是空操作。 */
+    private void stopTvbusLocked() {
+        if (!tvbusActive) {
+            return;
+        }
+        tvbusActive = false;
+        try {
+            com.mycjzb.media.player.tvbus.TvbusSession.stop();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void ensureSysLocked() {
+        if (sys == null) {
+            sys = new SysPlayerBackend();
+            sys.setHost(sysHost);
+        }
+    }
+
+    private void ensureShwLocked() {
+        if (shw == null) {
+            Context c = appContext != null ? appContext : currentApplication();
+            if (c == null) {
+                throw new IllegalStateException("SHW Media3 needs Context; use setDataSource(Context, Uri)");
+            }
+            MsNativeLoader.ensure();
+            shw = new M3PlayerBackend(c);
+            shw.setHost(shwHost);
+        }
+    }
+
+    private final ShwBackend.Host shwHost = new ShwBackend.Host() {
+        @Override
+        public void onPrepared() {
+            OnPreparedListener pl;
+            synchronized (lock) {
+                if (state != S_PREPARING) return;
+                state = S_PREPARED;
+                renderingStartSent = false;
+                bufferingSent = false;
+                seeking = false;
+                pl = onPrepared;
+            }
+            fireVideoSize(shw != null ? shw.getVideoWidth() : 0, shw != null ? shw.getVideoHeight() : 0);
+            if (pl != null) pl.onPrepared(MediaPlayer.this);
+        }
+
+        @Override
+        public void onCompletion() {
+            synchronized (lock) {
+                if (state == S_END) return;
+                state = S_PLAYBACK_COMPLETED;
+            }
+            fireCompletion();
+        }
+
+        @Override
+        public boolean onError(int what, int extra) {
+            synchronized (lock) {
+                if (state == S_END) return true;
+                state = S_ERROR;
+            }
+            fireError(what, extra);
+            return true;
+        }
+
+        @Override
+        public boolean onInfo(int what, int extra) {
+            postInfo(what, extra);
+            return false;
+        }
+
+        @Override
+        public void onSeekComplete() {
+            synchronized (lock) {
+                seeking = false;
+            }
+            postSeekComplete();
+        }
+
+        @Override
+        public void onBufferingUpdate(int percent) {
+            OnBufferingUpdateListener l;
+            synchronized (lock) {
+                l = onBufferingUpdate;
+            }
+            if (l != null) l.onBufferingUpdate(MediaPlayer.this, percent);
+        }
+
+        @Override
+        public void onVideoSizeChanged(int w, int h) {
+            synchronized (lock) {
+                lastW = w;
+                lastH = h;
+            }
+            fireVideoSize(w, h);
+        }
+
+        @Override
+        public void onTimedText(TimedText text) {
+            OnTimedTextListener l;
+            synchronized (lock) {
+                l = onTimedText;
+            }
+            if (l != null) {
+                l.onTimedText(MediaPlayer.this, text);
+            }
+        }
+    };
+
+    private final SysPlayerBackend.Host sysHost = new SysPlayerBackend.Host() {
+        @Override
+        public void onPrepared() {
+            OnPreparedListener pl;
+            synchronized (lock) {
+                if (state != S_PREPARING) return;
+                state = S_PREPARED;
+                renderingStartSent = false;
+                bufferingSent = false;
+                seeking = false;
+                pl = onPrepared;
+            }
+            fireVideoSize(sys != null ? sys.getVideoWidth() : 0, sys != null ? sys.getVideoHeight() : 0);
+            if (pl != null) pl.onPrepared(MediaPlayer.this);
+        }
+
+        @Override
+        public void onCompletion() {
+            synchronized (lock) {
+                if (state == S_END) return;
+                state = S_PLAYBACK_COMPLETED;
+            }
+            fireCompletion();
+        }
+
+        @Override
+        public boolean onError(int what, int extra) {
+            synchronized (lock) {
+                if (state == S_END) return true;
+                state = S_ERROR;
+            }
+            fireError(what, extra);
+            return true;
+        }
+
+        @Override
+        public boolean onInfo(int what, int extra) {
+            postInfo(what, extra);
+            return false;
+        }
+
+        @Override
+        public void onSeekComplete() {
+            synchronized (lock) {
+                seeking = false;
+            }
+            postSeekComplete();
+        }
+
+        @Override
+        public void onBufferingUpdate(int percent) {
+            OnBufferingUpdateListener l;
+            synchronized (lock) {
+                l = onBufferingUpdate;
+            }
+            if (l != null) l.onBufferingUpdate(MediaPlayer.this, percent);
+        }
+
+        @Override
+        public void onVideoSizeChanged(int w, int h) {
+            synchronized (lock) {
+                lastW = w;
+                lastH = h;
+            }
+            fireVideoSize(w, h);
+        }
+    };
 
     /* ---------------- prepare ---------------- */
 
@@ -376,36 +733,37 @@ public class MediaPlayer {
             requireState("prepare", S_INITIALIZED, S_STOPPED);
             state = S_PREPARING;
             gen = ++prepareGen;
-        }
-        int err = openAndWait(gen, DEFAULT_PREPARE_TIMEOUT_MS);
-        synchronized (lock) {
-            if (gen != prepareGen || state == S_END) {
-                throw new IOException("prepare interrupted by reset/release");
-            }
-            if (err != 0) {
-                state = S_ERROR;
-                throw new IOException("prepare failed: " + errName(err));
-            }
-            onPreparedLocked();
-        }
-        dispatchVideoSize();
-        /* 与系统一致：同步 prepare 成功后同样在主线程回调 onPrepared。 */
-        final int g = gen;
-        main.post(new Runnable() {
-            @Override
-            public void run() {
-                OnPreparedListener pl;
-                synchronized (lock) {
-                    if (g != prepareGen || state == S_END) {
-                        return;
+            if (isSysLocked()) {
+                try {
+                    bindSysSourceLocked();
+                    sys.prepare();
+                    onPreparedLocked();
+                } catch (IOException e) {
+                    state = S_ERROR;
+                    throw e;
+                } catch (RuntimeException e) {
+                    state = S_ERROR;
+                    throw new IOException("sys prepare failed", e);
+                }
+                final int g = gen;
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        OnPreparedListener pl;
+                        synchronized (lock) {
+                            if (g != prepareGen || state == S_END) return;
+                            pl = onPrepared;
+                        }
+                        if (pl != null) pl.onPrepared(MediaPlayer.this);
                     }
-                    pl = onPrepared;
-                }
-                if (pl != null) {
-                    pl.onPrepared(MediaPlayer.this);
-                }
+                });
+                return;
             }
-        });
+            if (isShwExtLocked()) {
+                throw new IOException("Media3 SHW: use prepareAsync()");
+            }
+            throw new IOException("unknown engine");
+        }
     }
 
     public void prepareAsync() {
@@ -414,144 +772,160 @@ public class MediaPlayer {
             requireState("prepareAsync", S_INITIALIZED, S_STOPPED);
             state = S_PREPARING;
             gen = ++prepareGen;
+            if (isSysLocked()) {
+                try {
+                    bindSysSourceLocked();
+                    sys.prepareAsync(); /* 成功/失败走 sysHost */
+                } catch (Throwable t) {
+                    state = S_ERROR;
+                    main.post(new Runnable() {
+                        public void run() {
+                            fireError(MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO);
+                        }
+                    });
+                }
+                return;
+            }
+            if (isShwExtLocked()) {
+                /* sop:// / tvbus://：和 rtmp 一样只是「另一种地址」，但源端要先起 P2P 引擎
+                 * 换成本机 http 再交给 Media3。解析放到后台线程，别堵调用方（通常是主线程）。 */
+                if (isTvbusSourceLocked()) {
+                    prepareTvbusAsyncLocked(gen);
+                    return;
+                }
+                try {
+                    bindShwSourceLocked();
+                    shw.prepareAsync();
+                } catch (Throwable t) {
+                    state = S_ERROR;
+                    main.post(new Runnable() {
+                        public void run() {
+                            fireError(MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO);
+                        }
+                    });
+                }
+                return;
+            }
+            state = S_ERROR;
         }
-        Thread t = new Thread(new Runnable() {
+    }
+
+    /** dataSource 当前是否 tvbus 类地址（sop:// / tvbus://）。 */
+    private boolean isTvbusSourceLocked() {
+        if (dataSource == null) {
+            return false;
+        }
+        try {
+            return com.mycjzb.media.player.tvbus.TvbusSession.isTvbusUrl(dataSource);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 后台把 sop:// / tvbus:// 解析成本机 http，再走正常 SHW 起播。
+     *
+     * <p>语义对齐 rtmp：地址是「协议 + 目标」，引擎在手，stop 跟着 release/reset 走。
+     * 解析失败或期间被 release/换台（{@code prepareGen} 变化）则丢弃本次结果。
+     */
+    private void prepareTvbusAsyncLocked(final int gen) {
+        final String tvbusUrl = dataSource;
+        final Context ctx = appContext != null ? appContext : currentApplication();
+        tvbusActive = true;
+        new Thread(new Runnable() {
             @Override
             public void run() {
-                final int err = openAndWait(gen, DEFAULT_PREPARE_TIMEOUT_MS);
+                String local = null;
+                try {
+                    local = com.mycjzb.media.player.tvbus.TvbusSession.resolve(ctx, tvbusUrl);
+                } catch (Throwable ignored) {
+                }
+                final String resolved = local;
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        OnPreparedListener pl = null;
                         synchronized (lock) {
-                            if (gen != prepareGen || state != S_PREPARING) {
-                                return; /* 已被 reset/release，丢弃 */
+                            if (gen != prepareGen || state == S_END) {
+                                return;
                             }
-                            if (err != 0) {
+                            if (resolved == null || resolved.length() == 0) {
+                                tvbusActive = false;
                                 state = S_ERROR;
-                            } else {
-                                onPreparedLocked();
-                                pl = onPrepared;
+                                fireError(MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO);
+                                return;
                             }
-                        }
-                        if (err != 0) {
-                            fireError(MEDIA_ERROR_UNKNOWN, err);
-                            return;
-                        }
-                        dispatchVideoSize();
-                        if (pl != null) {
-                            pl.onPrepared(MediaPlayer.this);
+                            dataSource = resolved;
+                            dataIsUrl = true;
+                            try {
+                                bindShwSourceLocked();
+                                shw.prepareAsync();
+                            } catch (Throwable t) {
+                                state = S_ERROR;
+                                fireError(MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO);
+                            }
                         }
                     }
                 });
             }
-        }, "msplayer-prepare");
-        t.start();
+        }, "tvbus-resolve").start();
+    }
+
+    /** 系统档：把已解析的 dataSource 交给 android.media.MediaPlayer。 */
+    private void bindSysSourceLocked() throws IOException {
+        ensureSysLocked();
+        if (display != null) {
+            sys.setDisplay(display);
+        } else if (surface != null) {
+            sys.setSurface(surface);
+        }
+        sys.setVolume(volLeft, volRight);
+        sys.setLooping(looping);
+        if (dataSource == null) {
+            throw new IOException("empty data source");
+        }
+        if (dataIsUrl) {
+            Context ctx = appContext;
+            if (ctx != null) {
+                sys.setDataSource(ctx, Uri.parse(dataSource), dataHeaders);
+            } else {
+                sys.setDataSource(dataSource);
+            }
+        } else {
+            sys.setDataSource(dataSource);
+        }
+    }
+
+    /** SHW Media3：同连接字节头选源。 */
+    private void bindShwSourceLocked() throws IOException {
+        ensureShwLocked();
+        if (display != null) {
+            shw.setDisplay(display);
+        } else if (surface != null) {
+            shw.setSurface(surface);
+        }
+        shw.setVolume(volLeft, volRight);
+        shw.setLooping(looping);
+        shw.setBufferConfig(bufMinMs, bufMaxMs, bufPlayMs, bufRebufMs, (int) bufMaxBytes);
+        shw.setPlaybackTlsVerify(playbackTlsVerify);
+        shw.setAudioPassthroughEnabled(passthroughEnabled);
+        if (dataSource == null) {
+            throw new IOException("empty data source");
+        }
+        if (dataIsUrl) {
+            Context ctx = appContext;
+            if (ctx != null) {
+                shw.setDataSource(ctx, Uri.parse(dataSource), dataHeaders);
+            } else {
+                shw.setDataSource(dataSource);
+            }
+        } else {
+            shw.setDataSource(dataSource);
+        }
+        /* 外挂字幕在 setMediaSource 前挂上；无则清 */
+        shw.setExternalTimedText(extSubPath, extSubMime);
     }
 
     /** 0=已打开；否则返回系统 MEDIA_ERROR_* extra（-1010/-1004/-110）。不持锁阻塞。 */
-    private int openAndWait(int gen, int timeoutMs) {
-        String loc;
-        boolean isUrl;
-        long h;
-        Surface s;
-        synchronized (lock) {
-            loc = dataSource;
-            isUrl = dataIsUrl;
-            h = nh;
-            s = surface;
-            if (h == 0) {
-                return MEDIA_ERROR_UNSUPPORTED; /* libmsplayer.so 未加载 */
-            }
-            if (loc == null || headersUnsupported) {
-                return MEDIA_ERROR_UNSUPPORTED;
-            }
-        }
-        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
-        long[] v = new long[Q_LEN];
-        /* 上一会话（stop/reset 后）还在收尾时先等它结束，避免把旧会话的结束误当成本次失败。 */
-        while (true) {
-            nativeQuery(h, v);
-            if (v[Q_ACTIVE] == 0 && v[Q_PENDING] == 0) {
-                break;
-            }
-            if (SystemClock.elapsedRealtime() > deadline || isStale(gen)) {
-                return MEDIA_ERROR_TIMED_OUT;
-            }
-            nativeStop(h);
-            SystemClock.sleep(10);
-        }
-        if (s != null) {
-            nativeSetSurface(h, s);
-        }
-        long base = v[Q_DONE];
-        int pa;
-        long pm;
-        synchronized (lock) {
-            pa = preloadAheadMs;
-            pm = preloadMaxBytes;
-        }
-        nativeSetPreload(h, pa, pm);
-        boolean bs;
-        int b0, b1, b2, b3;
-        long b4;
-        boolean tv;
-        synchronized (lock) {
-            bs = bufSet;
-            b0 = bufMinMs;
-            b1 = bufMaxMs;
-            b2 = bufPlayMs;
-            b3 = bufRebufMs;
-            b4 = bufMaxBytes;
-            tv = playbackTlsVerify;
-        }
-        if (bs) {
-            nativeSetBufferConfig(h, b0, b1, b2, b3, b4);
-        }
-        nativeSetTlsVerify(h, tv);
-        boolean pt;
-        Context ctx;
-        synchronized (lock) {
-            pt = passthroughEnabled;
-            ctx = appContext;
-        }
-        /* 每次 prepare 重新探测：HDMI 功放可能热插拔。不支持则下发 0，C 层走软解。 */
-        nativeSetAudioPassthrough(h, pt ? getAudioPassthroughCaps(ctx) : 0);
-        int rc = nativePrepare(h, loc, isUrl, timeoutMs);
-        if (rc != 0) {
-            return rc;
-        }
-        while (true) {
-            if (isStale(gen)) {
-                return MEDIA_ERROR_IO;
-            }
-            nativeQuery(h, v);
-            if (v[Q_OPENED] != 0) {
-                synchronized (lock) {
-                    doneBase = base;
-                }
-                nativeSetVolume(h, volLeft, volRight);
-                nativeSetLooping(h, looping);
-                if (speed != 1f) {
-                    nativeSetSpeed(h, speed);
-                }
-                return 0;
-            }
-            if (v[Q_DONE] != base) {
-                /* 会话结束但从未打开：本变体打不开/不支持该输入 */
-                if (isUrl && !nativeHasFf()) {
-                    return MEDIA_ERROR_UNSUPPORTED;
-                }
-                return v[Q_LAST_ERR] != 0 ? MEDIA_ERROR_UNSUPPORTED : MEDIA_ERROR_IO;
-            }
-            if (SystemClock.elapsedRealtime() > deadline) {
-                nativeStop(h);
-                return MEDIA_ERROR_TIMED_OUT;
-            }
-            SystemClock.sleep(PREPARE_POLL_MS);
-        }
-    }
-
     private boolean isStale(int gen) {
         synchronized (lock) {
             return gen != prepareGen || state == S_END;
@@ -577,54 +951,60 @@ public class MediaPlayer {
         synchronized (lock) {
             requireState("start", S_PREPARED, S_STARTED, S_PAUSED, S_PLAYBACK_COMPLETED);
             if (state == S_PLAYBACK_COMPLETED) {
+                if (isSysLocked() && sys != null) {
+                    try {
+                        sys.seekTo(0);
+                        sys.start();
+                        state = S_STARTED;
+                    } catch (Throwable t) {
+                        state = S_ERROR;
+                        fireError(MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO);
+                    }
+                    return;
+                }
+                if (isShwExtLocked() && shw != null) {
+                    try {
+                        shw.seekTo(0);
+                        shw.start();
+                        state = S_STARTED;
+                    } catch (Throwable t) {
+                        state = S_ERROR;
+                        fireError(MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO);
+                    }
+                    return;
+                }
                 /* 系统语义：完成后 start 从头播。原会话已结束，同源重新排队（本地文件/可重开地址）。 */
                 restartFromBeginningLocked();
                 return;
             }
-            nativeStart(nh);
-            state = S_STARTED;
-            schedulePollLocked();
+            if (isSysLocked()) {
+                if (sys != null) sys.start();
+                state = S_STARTED;
+                return;
+            }
+            if (isShwExtLocked()) {
+                if (shw != null) shw.start();
+                state = S_STARTED;
+                return;
+            }
+            state = S_ERROR;
         }
     }
 
     private void restartFromBeginningLocked() {
-        final int gen = ++prepareGen;
-        state = S_STARTED;
-        renderingStartSent = false;
-        final long h = nh;
-        Thread t = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                final int err = openAndWait(gen, DEFAULT_PREPARE_TIMEOUT_MS);
-                main.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        synchronized (lock) {
-                            if (gen != prepareGen || state != S_STARTED) {
-                                return;
-                            }
-                            if (err != 0) {
-                                state = S_ERROR;
-                            } else {
-                                nativeStart(h);
-                                schedulePollLocked();
-                            }
-                        }
-                        if (err != 0) {
-                            fireError(MEDIA_ERROR_UNKNOWN, err);
-                        }
-                    }
-                });
-            }
-        }, "msplayer-restart");
-        t.start();
+        /* 仅 sys/shw 完成态会走到；无旧 native 重开 */
+        state = S_ERROR;
     }
 
     public void pause() {
         synchronized (lock) {
             requireState("pause", S_STARTED, S_PAUSED, S_PLAYBACK_COMPLETED);
             if (state == S_STARTED) {
-                nativePause(nh);
+                if (isSysLocked()) {
+                    if (sys != null) sys.pause();
+                } else if (isShwExtLocked()) {
+                    if (shw != null) shw.pause();
+                }
                 state = S_PAUSED;
             }
         }
@@ -634,7 +1014,15 @@ public class MediaPlayer {
         synchronized (lock) {
             requireState("stop", S_PREPARED, S_STARTED, S_PAUSED, S_STOPPED, S_PLAYBACK_COMPLETED);
             prepareGen++;
-            nativeStop(nh);
+            if (isSysLocked()) {
+                if (sys != null) {
+                    try { sys.stop(); } catch (Throwable ignored) {}
+                }
+            } else if (isShwExtLocked()) {
+                if (shw != null) {
+                    try { shw.stop(); } catch (Throwable ignored) {}
+                }
+            }
             state = S_STOPPED;
             main.removeCallbacks(poller);
         }
@@ -644,18 +1032,32 @@ public class MediaPlayer {
         synchronized (lock) {
             checkNotReleased();
             prepareGen++;
-            if (nh != 0) {
-                nativeStop(nh);
+            if (isSysLocked()) {
+                if (sys != null) {
+                    try { sys.reset(); } catch (Throwable ignored) {}
+                }
+            } else if (isShwExtLocked()) {
+                if (shw != null) {
+                    try { shw.reset(); } catch (Throwable ignored) {}
+                }
             }
+            /* tvbus：reset 与 release 一样要停 P2P 会话（Media3 复位不会停引擎）。 */
+            stopTvbusLocked();
             main.removeCallbacks(poller);
             closePfdLocked();
             dataSource = null;
             dataIsUrl = false;
+            dataHeaders = null;
             headersUnsupported = false;
+            engine = PlayEngine.getDefault();
+            resetLiveDetectLocked();
+            liveHint = null;
             seeking = false;
             lastDurMs = -1;
             lastPosMs = 0;
-            extSubData = null; /* 系统语义：reset 清掉外挂字幕；原生侧在下次 prepare 时清（不在这里阻塞等锁） */
+            extSubData = null; /* 系统语义：reset 清掉外挂字幕 */
+            extSubPath = null;
+            extSubMime = null;
             lastTracks = new TrackInfo[0];
             lastCueKey = null;
             state = S_IDLE;
@@ -663,7 +1065,6 @@ public class MediaPlayer {
     }
 
     public void release() {
-        long h;
         synchronized (lock) {
             if (state == S_END) {
                 return;
@@ -671,8 +1072,8 @@ public class MediaPlayer {
             prepareGen++;
             main.removeCallbacksAndMessages(null);
             closePfdLocked();
-            h = nh;
-            nh = 0;
+            releaseSysLocked();
+            releaseShwLocked();
             state = S_END;
             onPrepared = null;
             onCompletion = null;
@@ -683,10 +1084,8 @@ public class MediaPlayer {
             onVideoSizeChanged = null;
             onTimedText = null;
             extSubData = null;
-        }
-        if (h != 0) {
-            nativeStop(h);
-            nativeRelease(h); /* 原生侧 join/回收 worker，不泄漏 */
+            extSubPath = null;
+            extSubMime = null;
         }
     }
 
@@ -704,17 +1103,49 @@ public class MediaPlayer {
             if (msec < 0) {
                 msec = 0;
             }
-            int rc = nativeSeekTo(nh, msec);
-            notSeekable = rc == MEDIA_ERROR_UNSUPPORTED;
-            if (!notSeekable) {
-                seeking = true;
-                seekTargetMs = msec;
-                seekIssuedAt = SystemClock.elapsedRealtime();
-                lastPosMs = msec;
-                schedulePollLocked();
+            if (isSysLocked()) {
+                notSeekable = false;
+                if (sys != null) {
+                    try {
+                        sys.seekTo((int) msec);
+                        seeking = true;
+                        seekTargetMs = msec;
+                        lastPosMs = msec;
+                    } catch (Throwable t) {
+                        notSeekable = true;
+                        seeking = false;
+                    }
+                }
+            } else if (isShwExtLocked()) {
+                notSeekable = false;
+                if (shw != null) {
+                    try {
+                        shw.seekTo((int) msec);
+                        seeking = true;
+                        seekTargetMs = msec;
+                        lastPosMs = msec;
+                    } catch (Throwable t) {
+                        notSeekable = true;
+                        seeking = false;
+                    }
+                }
+            } else {
+                int rc = MEDIA_ERROR_UNSUPPORTED;
+                notSeekable = rc == MEDIA_ERROR_UNSUPPORTED;
+                if (!notSeekable) {
+                    seeking = true;
+                    seekTargetMs = msec;
+                    seekIssuedAt = SystemClock.elapsedRealtime();
+                    lastPosMs = msec;
+                    schedulePollLocked();
+                }
             }
         }
         if (notSeekable) {
+            synchronized (lock) {
+                liveNotSeekable = true;
+                liveCached = -1;
+            }
             postInfo(MEDIA_INFO_NOT_SEEKABLE, 0);
             postSeekComplete();
         }
@@ -722,25 +1153,34 @@ public class MediaPlayer {
 
     public int getCurrentPosition() {
         synchronized (lock) {
-            if (nh == 0 || state == S_IDLE || state == S_INITIALIZED || state == S_ERROR || state == S_END) {
+            if (state == S_IDLE || state == S_INITIALIZED || state == S_ERROR || state == S_END) {
                 return 0;
             }
-            if (seeking) {
-                return (int) seekTargetMs;
+            if (isSysLocked()) {
+                return sys != null ? sys.getCurrentPosition() : 0;
             }
-            refreshLocked();
-            return (int) lastPosMs;
+            if (isShwExtLocked()) {
+                return shw != null ? shw.getCurrentPosition() : 0;
+            }
+            return 0;
         }
     }
 
     /** 毫秒；未知（直播或路线 A 会话未给出时长）返回 -1，与系统一致。 */
     public int getDuration() {
         synchronized (lock) {
-            if (nh == 0 || state == S_IDLE || state == S_INITIALIZED || state == S_ERROR || state == S_END) {
+            if (state == S_IDLE || state == S_INITIALIZED || state == S_ERROR || state == S_END) {
                 return -1;
             }
-            refreshLocked();
-            return lastDurMs;
+            if (isSysLocked()) {
+                return sys != null ? sys.getDuration() : -1;
+            }
+            if (isShwExtLocked()) {
+                if (shw == null) return -1;
+                int d = shw.getDuration();
+                return d <= 0 ? -1 : d;
+            }
+            return -1;
         }
     }
 
@@ -752,8 +1192,11 @@ public class MediaPlayer {
 
     public int getVideoWidth() {
         synchronized (lock) {
-            if (nh != 0 && state != S_END) {
-                refreshLocked();
+            if (isSysLocked()) {
+                return sys != null ? sys.getVideoWidth() : lastW;
+            }
+            if (isShwExtLocked()) {
+                return shw != null ? shw.getVideoWidth() : lastW;
             }
             return lastW;
         }
@@ -761,10 +1204,48 @@ public class MediaPlayer {
 
     public int getVideoHeight() {
         synchronized (lock) {
-            if (nh != 0 && state != S_END) {
-                refreshLocked();
+            if (isSysLocked()) {
+                return sys != null ? sys.getVideoHeight() : lastH;
+            }
+            if (isShwExtLocked()) {
+                return shw != null ? shw.getVideoHeight() : lastH;
             }
             return lastH;
+        }
+    }
+
+    /** 演示 OSD：视频 MIME（如 video/avc），无则 null。 */
+    public String getVideoMime() {
+        synchronized (lock) {
+            return isShwExtLocked() && shw != null ? shw.videoMime() : null;
+        }
+    }
+
+    /** 演示 OSD：音频 MIME（如 audio/mp4a-latm），无则 null。 */
+    public String getAudioMime() {
+        synchronized (lock) {
+            return isShwExtLocked() && shw != null ? shw.audioMime() : null;
+        }
+    }
+
+    /** 演示 OSD：帧率，未知 0。 */
+    public float getVideoFrameRate() {
+        synchronized (lock) {
+            return isShwExtLocked() && shw != null ? shw.videoFrameRate() : 0f;
+        }
+    }
+
+    /** 演示 OSD：视频码率 bps，未知 -1。 */
+    public int getVideoBitrate() {
+        synchronized (lock) {
+            return isShwExtLocked() && shw != null ? shw.videoBitrate() : -1;
+        }
+    }
+
+    /** 演示 OSD：音频码率 bps，未知 -1。 */
+    public int getAudioBitrate() {
+        synchronized (lock) {
+            return isShwExtLocked() && shw != null ? shw.audioBitrate() : -1;
         }
     }
 
@@ -773,8 +1254,10 @@ public class MediaPlayer {
             checkNotReleased();
             volLeft = clamp01(leftVolume);
             volRight = clamp01(rightVolume);
-            if (nh != 0) {
-                nativeSetVolume(nh, volLeft, volRight);
+            if (isSysLocked() && sys != null) {
+                sys.setVolume(volLeft, volRight);
+            } else if (isShwExtLocked() && shw != null) {
+                shw.setVolume(volLeft, volRight);
             }
         }
     }
@@ -788,8 +1271,10 @@ public class MediaPlayer {
         synchronized (lock) {
             checkNotReleased();
             looping = loop;
-            if (nh != 0) {
-                nativeSetLooping(nh, loop);
+            if (isSysLocked() && sys != null) {
+                sys.setLooping(loop);
+            } else if (isShwExtLocked() && shw != null) {
+                shw.setLooping(loop);
             }
         }
     }
@@ -881,11 +1366,7 @@ public class MediaPlayer {
 
     /** 当前音频路由：0=软解/系统解码，1=原始帧直通，2=IEC61937 直通（prepare 且出声后有效）。 */
     public int getAudioPassthroughRoute() {
-        long h;
-        synchronized (lock) {
-            h = nh;
-        }
-        return h != 0 ? nativeGetAudioPassthroughRoute(h) : 0;
+        return 0;
     }
 
     /* 能力位，与 src/hw/ms_hw_passthrough.h 的 MS_PT_CAP_* 一致。 */
@@ -986,6 +1467,12 @@ public class MediaPlayer {
 
     public boolean isLooping() {
         synchronized (lock) {
+            if (isSysLocked() && sys != null) {
+                return sys.isLooping();
+            }
+            if (isShwExtLocked() && shw != null) {
+                return shw.isLooping();
+            }
             return looping;
         }
     }
@@ -995,8 +1482,10 @@ public class MediaPlayer {
             checkNotReleased();
             display = sh;
             surface = sh != null ? sh.getSurface() : null;
-            if (nh != 0) {
-                nativeSetSurface(nh, surface);
+            if (isSysLocked() && sys != null) {
+                sys.setDisplay(sh);
+            } else if (isShwExtLocked() && shw != null) {
+                shw.setDisplay(sh);
             }
             if (sh != null) {
                 sh.setKeepScreenOn(screenOnWhilePlaying);
@@ -1009,8 +1498,10 @@ public class MediaPlayer {
             checkNotReleased();
             display = null;
             surface = s;
-            if (nh != 0) {
-                nativeSetSurface(nh, s);
+            if (isSysLocked() && sys != null) {
+                sys.setSurface(s);
+            } else if (isShwExtLocked() && shw != null) {
+                shw.setSurface(s);
             }
         }
     }
@@ -1044,7 +1535,7 @@ public class MediaPlayer {
             if (sp == 0f) {
                 /* 系统语义：speed=0 等同暂停 */
                 if (state == S_STARTED) {
-                    nativePause(nh);
+                    /* no native */
                     state = S_PAUSED;
                 }
                 return;
@@ -1053,8 +1544,8 @@ public class MediaPlayer {
                 throw new IllegalArgumentException("speed out of range");
             }
             speed = sp;
-            if (nh != 0 && (state == S_PREPARED || state == S_STARTED || state == S_PAUSED)) {
-                int st = nativeSetSpeed(nh, sp);
+            if (false) {
+                int st = 0;
                 if (st != 0) {
                     throw new IllegalStateException("speed rejected: " + st);
                 }
@@ -1191,6 +1682,12 @@ public class MediaPlayer {
     public TrackInfo[] getTrackInfo() throws IllegalStateException {
         synchronized (lock) {
             requireState("getTrackInfo", S_PREPARED, S_STARTED, S_PAUSED, S_STOPPED, S_PLAYBACK_COMPLETED);
+            if (isSysLocked()) {
+                return new TrackInfo[0];
+            }
+            if (isShwExtLocked()) {
+                return shw != null ? shw.getTrackInfo() : new TrackInfo[0];
+            }
             TrackInfo[] t = listTracksLocked();
             TrackInfo[] copy = new TrackInfo[t.length];
             System.arraycopy(t, 0, copy, 0, t.length);
@@ -1216,6 +1713,12 @@ public class MediaPlayer {
     public int getSelectedTrack(int trackType) throws IllegalStateException {
         synchronized (lock) {
             requireState("getSelectedTrack", S_PREPARED, S_STARTED, S_PAUSED, S_STOPPED, S_PLAYBACK_COMPLETED);
+            if (isSysLocked()) {
+                return -1;
+            }
+            if (isShwExtLocked()) {
+                return shw != null ? shw.getSelectedTrack(trackType) : -1;
+            }
             TrackInfo[] t = listTracksLocked();
             for (int i = 0; i < t.length; i++) {
                 if (t[i].selected && t[i].getTrackType() == trackType) {
@@ -1226,11 +1729,53 @@ public class MediaPlayer {
         }
     }
 
+    /**
+     * PCM 5 段能量 0–255（对齐超级直播 / ijk audio_bars）。透传无 PCM 时返回 false。
+     * 系统档恒 false。
+     */
+    public boolean getAudioBars(int[] out) {
+        synchronized (lock) {
+            if (state == S_END || out == null) {
+                return false;
+            }
+            if (isShwExtLocked() && shw != null) {
+                return shw.readAudioBars(out);
+            }
+            return false;
+        }
+    }
+
     private void selectOrDeselectTrack(int index, boolean on) {
         boolean unsupported = false;
         synchronized (lock) {
             String op = on ? "selectTrack" : "deselectTrack";
             requireState(op, S_PREPARED, S_STARTED, S_PAUSED, S_PLAYBACK_COMPLETED);
+            if (isSysLocked()) {
+                return;
+            }
+            if (isShwExtLocked()) {
+                if (shw == null) {
+                    return;
+                }
+                TrackInfo[] t = shw.getTrackInfo();
+                if (index < 0 || index >= t.length) {
+                    throw new IllegalArgumentException(op + ": index " + index + " out of range (" + t.length + " tracks)");
+                }
+                int type = t[index].getTrackType();
+                boolean isText = isTextType(type);
+                if (!isText && type != TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
+                    throw new IllegalArgumentException(op + ": only audio, timed text or subtitle tracks can be selected");
+                }
+                if (!on && !isText) {
+                    throw new IllegalArgumentException("deselectTrack: audio track cannot be deselected");
+                }
+                if (on) {
+                    shw.selectTrack(index);
+                } else {
+                    shw.deselectTrack(index);
+                }
+                return;
+            }
             TrackInfo[] t = listTracksLocked();
             if (index < 0 || index >= t.length) {
                 throw new IllegalArgumentException(op + ": index " + index + " out of range (" + t.length + " tracks)");
@@ -1247,11 +1792,11 @@ public class MediaPlayer {
                 /* 与系统一致：同一时间只有一条字幕轨，选新轨前先关掉其它已选字幕轨 */
                 for (int i = 0; i < t.length; i++) {
                     if (i != index && t[i].selected && isTextType(t[i].getTrackType())) {
-                        nativeSelectTrack(nh, t[i].id, false);
+                        /* removed */
                     }
                 }
             }
-            int rc = nativeSelectTrack(nh, t[index].id, on);
+            int rc = 0;
             if (rc == MS_ERR_UNSUPPORTED && isText) {
                 unsupported = true;
             } else if (rc != 0) {
@@ -1293,39 +1838,7 @@ public class MediaPlayer {
 
     /** 持锁读取原生轨道表；原生忙（拿不到锁）时返回上次结果。 */
     private TrackInfo[] listTracksLocked() {
-        if (nh == 0) {
-            return lastTracks;
-        }
-        int n = -1;
-        for (int tries = 0; tries < 3 && n < 0; tries++) {
-            java.util.Arrays.fill(trackStrs, null);
-            n = nativeGetTracks(nh, trackMeta, trackStrs);
-            if (n >= 0 || lastTracks.length > 0) {
-                break; /* 有旧结果就不再等 */
-            }
-        }
-        if (n < 0) {
-            return overlayPendingAudio(lastTracks);
-        }
-        if (n > TRACK_MAX) {
-            n = TRACK_MAX;
-        }
-        TrackInfo[] t = new TrackInfo[n];
-        for (int i = 0; i < n; i++) {
-            int m = i * TRACK_META;
-            int s = i * TRACK_STRS;
-            boolean sel = trackMeta[m + 3] != 0;
-            if (pendingAudioSet && trackMeta[m + 1] == TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
-                if (trackMeta[m] == pendingAudioId && sel) {
-                    pendingAudioSet = false; /* 内核已提交 */
-                }
-            }
-            t[i] = new TrackInfo(trackMeta[m], trackMeta[m + 1], sel,
-                    trackMeta[m + 4] != 0, trackMeta[m + 5] != 0,
-                    trackStrs[s], trackStrs[s + 1], trackStrs[s + 2]);
-        }
-        lastTracks = t;
-        return overlayPendingAudio(t);
+        return lastTracks != null ? lastTracks : new TrackInfo[0];
     }
 
     /** 内核提交音轨切换前，音轨选中状态按用户请求报（返回新数组，不改缓存）。 */
@@ -1357,6 +1870,20 @@ public class MediaPlayer {
         }
         Uri u = Uri.parse(path);
         String file = "file".equalsIgnoreCase(u.getScheme()) ? u.getPath() : path;
+        synchronized (lock) {
+            if (isShwExtLocked()) {
+                File f = new File(file);
+                if (!f.exists()) {
+                    throw new IOException("timed text file not found: " + path);
+                }
+                extSubPath = file;
+                extSubMime = mimeType;
+                if (shw != null) {
+                    shw.setExternalTimedText(file, mimeType);
+                }
+                return;
+            }
+        }
         FileInputStream in = new FileInputStream(file);
         try {
             setTimedTextSource(readLimited(in), fmt);
@@ -1376,6 +1903,16 @@ public class MediaPlayer {
         if (scheme == null || "file".equalsIgnoreCase(scheme)) {
             addTimedTextSource(uri.getPath(), mimeType);
             return;
+        }
+        synchronized (lock) {
+            if (isShwExtLocked()) {
+                extSubPath = uri.toString();
+                extSubMime = mimeType;
+                if (shw != null) {
+                    shw.setExternalTimedText(extSubPath, mimeType);
+                }
+                return;
+            }
         }
         InputStream in = context.getContentResolver().openInputStream(uri);
         if (in == null) {
@@ -1421,11 +1958,36 @@ public class MediaPlayer {
             }
             data = new byte[bb.position()];
             System.arraycopy(bb.array(), 0, data, 0, data.length);
-            setTimedTextSource(data, fmt);
         } catch (IOException e) {
-            /* 系统该重载不声明 IOException；读失败按参数错误报。 */
             throw new IllegalArgumentException("cannot read timed text fd: " + e.getMessage());
         }
+        synchronized (lock) {
+            if (isShwExtLocked()) {
+                /* Media3 吃文件路径：落 cache 再挂 */
+                try {
+                    Context c = appContext != null ? appContext : currentApplication();
+                    if (c == null) {
+                        throw new IllegalArgumentException("SHW timed text fd needs Context");
+                    }
+                    File tmp = new File(c.getCacheDir(), "ms_ext_sub.tmp");
+                    java.io.FileOutputStream fos = new java.io.FileOutputStream(tmp);
+                    try {
+                        fos.write(data);
+                    } finally {
+                        fos.close();
+                    }
+                    extSubPath = tmp.getAbsolutePath();
+                    extSubMime = mime;
+                    if (shw != null) {
+                        shw.setExternalTimedText(extSubPath, mime);
+                    }
+                    return;
+                } catch (IOException e) {
+                    throw new IllegalArgumentException("cannot write timed text cache: " + e.getMessage());
+                }
+            }
+        }
+        setTimedTextSource(data, fmt);
     }
 
     private static int timedTextFormat(String mime) {
@@ -1489,24 +2051,24 @@ public class MediaPlayer {
 
     /** 把 Java 侧保存的外挂字幕交给原生；没有则清掉原生残留。返回 ms_status。 */
     private int applyTimedTextSourceLocked() {
-        if (nh == 0) {
+        if (true) {
             return 0;
         }
         if (extSubData == null) {
             if (extSubApplied) {
-                nativeAddTimedText(nh, null, 0);
+                /* removed */
                 extSubApplied = false;
             }
             return 0;
         }
-        int rc = nativeAddTimedText(nh, extSubData, extSubFmt);
+        int rc = 0;
         extSubApplied = rc == 0;
         return rc;
     }
 
     /** 主线程轮询：取当前文字字幕，和上次不同返回 true（lastCueKey 已更新）。 */
     private boolean pollCueLocked() {
-        byte[] b = nativeGetCue(nh, cueMeta);
+        byte[] b = null;
         if (cueMeta[9] < 0) {
             return false; /* 原生忙，保持上次 */
         }
@@ -1615,24 +2177,11 @@ public class MediaPlayer {
     /* ---------------- 主线程轮询派发 ---------------- */
 
     private void schedulePollLocked() {
-        main.removeCallbacks(poller);
-        main.postDelayed(poller, (!renderingStartSent && state == S_STARTED) ? POLL_FAST_MS : POLL_MS);
+        /* Media3/系统靠回调 */
     }
 
     /** 持锁读取原生快照（busy 时保留旧值）。 */
     private void refreshLocked() {
-        if (nh == 0) {
-            return;
-        }
-        nativeQuery(nh, q);
-        if (q[Q_BUSY] == 0) {
-            lastPosMs = q[Q_POS_MS];
-            lastDurMs = q[Q_DUR_MS] > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) q[Q_DUR_MS];
-            if (q[Q_W] > 0 && q[Q_H] > 0) {
-                lastW = (int) q[Q_W];
-                lastH = (int) q[Q_H];
-            }
-        }
     }
 
     private void pollOnce() {
@@ -1647,7 +2196,7 @@ public class MediaPlayer {
         boolean cueChanged = false;
         OnTimedTextListener ttl;
         synchronized (lock) {
-            if (nh == 0 || !(state == S_PREPARED || state == S_STARTED || state == S_PAUSED)) {
+            if (true || !(state == S_PREPARED || state == S_STARTED || state == S_PAUSED)) {
                 return;
             }
             ttl = onTimedText;
@@ -1858,8 +2407,8 @@ public class MediaPlayer {
         long[] v = new long[10];
         java.util.Arrays.fill(v, -1L);
         synchronized (lock) {
-            if (nh != 0) {
-                nativeStartupStats(nh, v);
+            if (false) {
+                /* removed */
             }
         }
         return v;
@@ -1875,27 +2424,4 @@ public class MediaPlayer {
     }
 
     /* ---------------- 原生接口（libmsplayer.so，两条路线同一签名） ---------------- */
-    private static native long nativeSetup();
-    private static native void nativeRelease(long h);
-    private static native void nativeSetSurface(long h, Surface s);
-    private static native boolean nativeHasFf();
-    private static native int nativePrepare(long h, String loc, boolean isUrl, int timeoutMs);
-    private static native void nativeQuery(long h, long[] out);
-    private static native void nativeStart(long h);
-    private static native void nativePause(long h);
-    private static native void nativeStop(long h);
-    private static native int nativeSeekTo(long h, long msec);
-    private static native void nativeSetVolume(long h, float l, float r);
-    private static native void nativeSetLooping(long h, boolean on);
-    private static native int nativeSetSpeed(long h, float speed);
-    private static native void nativeStartupStats(long h, long[] out);
-    private static native void nativeSetPreload(long h, int aheadMs, long maxBytes);
-    private static native void nativeSetBufferConfig(long h, int minMs, int maxMs, int playMs, int rebufMs, long maxBytes);
-    private static native void nativeSetTlsVerify(long h, boolean strict);
-    private static native void nativeSetAudioPassthrough(long h, int caps);
-    private static native int nativeGetAudioPassthroughRoute(long h);
-    private static native int nativeGetTracks(long h, int[] meta, String[] strs);
-    private static native int nativeSelectTrack(long h, int id, boolean on);
-    private static native byte[] nativeGetCue(long h, int[] meta);
-    private static native int nativeAddTimedText(long h, byte[] data, int fmt);
 }

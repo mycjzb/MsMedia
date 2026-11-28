@@ -152,6 +152,21 @@ static int bmff_type_ok(const uint8_t *t)
     return 0;
 }
 
+/* 脏字节窗口内：大段可打印 ASCII 则不像 TS/M2TS（避免 JS 里 G/ORIGIN 误判） */
+static int ascii_textish(const uint8_t *p, size_t n)
+{
+    size_t i, lim = n < 16 ? n : 16, asc = 0;
+    if (lim == 0) {
+        return 0;
+    }
+    for (i = 0; i < lim; i++) {
+        if (p[i] >= 0x20 && p[i] < 0x7f) {
+            asc++;
+        }
+    }
+    return asc * 4 >= lim * 3;
+}
+
 static int adts_ok(const uint8_t *d, size_t n, int eof, int *need)
 {
     size_t fl;
@@ -190,7 +205,18 @@ int ms_probe_format_at(const uint8_t *d, size_t n, int eof, int *need_more)
         if (ts_sync(d, n, eof, 188, 0, &need)) return MS_PF_TS;
         if (!need && ts_sync(d, n, eof, 204, 0, &need)) return MS_PF_TS204;
     }
-    if (n >= 5 && d[4] == 0x47 && ts_sync(d, n, eof, 192, 4, &need)) return MS_PF_TS192;
+    /* M2TS：4B 头 + 0x47。拒绝对「全可打印 ASCII」假头（JS 里 ORIGIN 的 G 曾误判） */
+    if (n >= 5 && d[4] == 0x47) {
+        int asc = 0, hi;
+        for (hi = 0; hi < 4; hi++) {
+            if (d[hi] >= 0x20 && d[hi] < 0x7f) {
+                asc++;
+            }
+        }
+        if (asc < 4 && ts_sync(d, n, eof, 192, 4, &need)) {
+            return MS_PF_TS192;
+        }
+    }
     if (n >= 8) {
         uint32_t sz = be32(d);
         if (bmff_type_ok(d + 4) && (sz == 0 || sz == 1 || sz >= 8)) return MS_PF_BMFF;
@@ -266,6 +292,13 @@ int ms_probe_payload(const uint8_t *d, size_t n, int eof, ms_probe_result *r)
         fmt = ms_probe_format_at(p, n - off - i, eof, &nm);
         if (fmt == MS_PF_ADTS || fmt == MS_PF_MP3 || fmt == MS_PF_AC3 || fmt == MS_PF_LATM || fmt == MS_PF_ID3)
             fmt = MS_PF_UNKNOWN; /* 脏字节里不认弱签名裸音频 */
+        if (fmt == MS_PF_HLS || fmt == MS_PF_DASH)
+            fmt = MS_PF_UNKNOWN; /* JS 字符串常含 #EXTM3U / <MPD */
+        if ((fmt == MS_PF_TS || fmt == MS_PF_TS192 || fmt == MS_PF_TS204 || fmt == MS_PF_BMFF
+             || fmt == MS_PF_FLV)
+            && ascii_textish(p, n - off - i)) {
+            fmt = MS_PF_UNKNOWN; /* 可打印文本里的 G/skip/free/FLV 假签名 */
+        }
         if (fmt != MS_PF_UNKNOWN) {
             r->junk_bytes = i;
             off += i;

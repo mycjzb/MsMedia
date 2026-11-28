@@ -2,10 +2,7 @@
  * FFmpeg "tls" URL 协议后端（播放器拉流专用：https / tls / rtmps）。
  * 握手/读写统一走公共网络层的 TLS 泵 ms_nc_tls_*（与 MsHttpClient 同一份实现）；
  * 底层字节通道是 FFmpeg 的 tcp 子连接（已被 tcp_ms.c 覆盖为自研拨号）。
- * 证书策略（用户定调：只有播放忽略，API 不忽略）：
- *   - MS_NC_TLS_OPENSSL（路线 B 主力）：按 FFmpeg tls_verify 选项决定；ms_ff 默认传 0 = 忽略证书链与主机名
- *     （自签 / IP 直连 / 过期根证书都能播），播放器 setTlsVerify(true) 时传 1 切回严格；
- *   - 系统 SSLEngine 后端（路线 A / 旧多 so）：不支持关闭校验，verify=0 直接拒绝（与旧行为一致）。
+ * 证书策略：OpenSSL 后端按 FFmpeg tls_verify；ms_ff 默认 0=忽略证书（播放），API 另走严格。
  * 不支持 listen / DTLS。by: Long <mycjzb@gmail.com>
  * 在 libmsplayer.so 最终链接时编译（slimff FFmpeg 构建系统不编译本文件）。
  * by: Long <mycjzb@gmail.com>
@@ -70,12 +67,6 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     if (s->listen || s->is_dtls) {
         return AVERROR(ENOSYS);
     }
-#ifndef MS_NC_TLS_OPENSSL
-    if (!s->verify) {
-        av_log(h, AV_LOG_ERROR, "androidtls: refusing tls_verify=0\n");
-        return AVERROR(EPERM);
-    }
-#endif
     if ((ret = ff_tls_open_underlying(s, h, uri, options)) < 0) {
         return ret;
     }

@@ -1,0 +1,44 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+/*
+ * Media3 1.4.1：与超级直播共用 bs-p2p/third_party/media3-src（同级仓库；MS_MEDIA3_SRC 可覆盖），
+ * 源码工程直接参与编译。禁止 implementation 'androidx.media3:…' AAR/JAR。
+ */
+def media3Root = file(System.getenv('MS_MEDIA3_SRC') ?: '../../../bs-p2p/third_party/media3-src')
+if (!new File(media3Root, 'libraries/exoplayer').isDirectory()) {
+    throw new GradleException("缺共享 Media3 源码：${media3Root}（把 bs-p2p 拉到 MsMedia 同级，或设 MS_MEDIA3_SRC）")
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        /* 仅编 Media3 源码时的传递依赖（annotation/guava/kotlin），不含 media3 AAR；与共享源码同目录。 */
+        exclusiveContent {
+            forRepository {
+                maven { url = new File(media3Root, '../media3-m2').toURI() }
+            }
+            filter {
+                includeGroupByRegex 'androidx\\..*'
+                includeGroup 'com.google.guava'
+                includeGroup 'com.google.errorprone'
+                includeGroup 'org.checkerframework'
+                includeGroup 'com.google.code.findbugs'
+                includeGroup 'org.jetbrains.kotlin'
+                includeGroup 'org.jetbrains'
+            }
+        }
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "MsMedia-M3Demo"
+include ':app'
+
+/* 共享 settings 已注册 common…exoplayer、exoplayer_hls、exoplayer_dash（:media3-lib-<name>） */
+gradle.ext.androidxMediaSettingsDir = media3Root.absolutePath
+gradle.ext.androidxMediaModulePrefix = 'media3-'
+apply from: new File(media3Root, 'ms_udpxy_settings.gradle')

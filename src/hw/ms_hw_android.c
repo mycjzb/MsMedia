@@ -23,6 +23,10 @@
 #include <media/NdkMediaFormat.h>
 #include <media/NdkMediaError.h>
 #include "ms_hw_mediandk.h"
+/* MediaCodec.BUFFER_FLAG_KEY_FRAME=1；NDK 21（超级直播同款）头文件未暴露 */
+#ifndef AMEDIACODEC_BUFFER_FLAG_KEY_FRAME
+#define AMEDIACODEC_BUFFER_FLAG_KEY_FRAME 1
+#endif
 #endif
 
 static int device_api(int hint)

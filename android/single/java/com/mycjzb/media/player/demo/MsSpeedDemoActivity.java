@@ -30,24 +30,19 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
 public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callback {
 
-    /* =====================================================================
-     * 测试地址数组：直接在这里替换 / 追加多个源，遥控器上下键（频道+/-）循环切换。
-     * - 不带 scheme 且不以 / 开头的条目：相对本应用外部目录
-     *   /sdcard/Android/data/<包名>/files/ （adb push 样本到这里即可，无需存储权限）。
-     * - 以 / 开头：设备绝对路径；http:// https:// rtmp:// udp:// 等：网络地址
-     *   （纯自研路线 A 只支持本地 MP4/TS/FLV，网络地址会诚实 prepare 失败）。
-     * - 10.0.2.2 是模拟器访问宿主机的固定地址，仅作本地测试占位。
-     * 请勿把私有流地址提交进代码仓库。
-     * ===================================================================== */
+    /* 默认列表：优先 assets/channels.txt（DIY 名,url / #genre#）；没有再用下面兜底。
+     * 遥控器上下切台；adb --es urls 'a|b' 仍可临时覆盖。 */
     static final String[] TEST_URLS = {
             "h264_aac.ts",
             "h264_aac.mp4",
@@ -175,6 +170,7 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
     private SurfaceHolder holder;
     private TextView overlay;
     private String[] urls = TEST_URLS;
+    private String[] names = new String[0];
     static volatile boolean sPassthrough;
     private int index = 0;
     private boolean useMs = true;
@@ -220,8 +216,42 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
         setContentView(root);
         surface.getHolder().addCallback(this);
+        loadChannelsAsset();
         parseIntent(getIntent());
         refreshOverlay();
+    }
+
+    /** 读 assets/channels.txt：跳过空行与 #genre#；行格式 台名,url */
+    private void loadChannelsAsset() {
+        InputStream in = null;
+        try {
+            in = getAssets().open("channels.txt");
+            BufferedReader br = new BufferedReader(new InputStreamReader(in, "UTF-8"));
+            ArrayList<String> u = new ArrayList<String>();
+            ArrayList<String> n = new ArrayList<String>();
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.length() == 0 || line.contains("#genre#")) continue;
+                int c = line.indexOf(',');
+                if (c <= 0 || c + 1 >= line.length()) continue;
+                String name = line.substring(0, c).trim();
+                String url = line.substring(c + 1).trim();
+                if (url.length() == 0) continue;
+                n.add(name);
+                u.add(url);
+            }
+            br.close();
+            if (u.size() > 0) {
+                urls = u.toArray(new String[u.size()]);
+                names = n.toArray(new String[n.size()]);
+                Log.i(TAG, "channels asset loaded n=" + urls.length);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "channels asset skip: " + t.getMessage());
+        } finally {
+            if (in != null) try { in.close(); } catch (Throwable ignored) {}
+        }
     }
 
     private Button button(String text, View.OnClickListener l) {
@@ -235,7 +265,10 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
     private void parseIntent(Intent it) {
         if (it == null) return;
         String u = it.getStringExtra("urls");
-        if (u != null && u.length() > 0) urls = u.split("\\|");
+        if (u != null && u.length() > 0) {
+            urls = u.split("\\|");
+            names = new String[0];
+        }
         String p = it.getStringExtra("player");
         if (p != null) useMs = !"sys".equals(p);
         String a = it.getStringExtra("auto");
@@ -490,6 +523,7 @@ public class MsSpeedDemoActivity extends Activity implements SurfaceHolder.Callb
         StringBuilder sb = new StringBuilder();
         sb.append("播放器: ").append(useMs ? (com.mycjzb.media.player.MediaPlayer.isFfmpegRoute() ? "MsMedia(路线B)" : "MsMedia(路线A)") : "System")
           .append("    频道: ").append(index + 1).append('/').append(urls.length).append('\n');
+        if (names.length > index) sb.append(names[index]).append('\n');
         sb.append(redact(urls.length > 0 ? urls[index] : "-")).append('\n');
         sb.append("create→setDataSource: ").append(tSetDs > 0 ? (tSetDs - tCreate) + " ms" : "-").append('\n');
         sb.append("→OnPrepared: ").append(tPrepared > 0 ? (tPrepared - tCreate) + " ms" : "-").append('\n');

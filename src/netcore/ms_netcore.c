@@ -1,9 +1,8 @@
 /*
  * 公共可控网络层实现：拨号 / DNS 钩子 / SOCKS5 / TLS 泵 / HTTP/1.1。
  * 阻塞式 + poll 分片（每 100ms 检查取消），不忙等。所有缓冲有界。
- * TLS 后端二选一：MS_NC_TLS_OPENSSL=极致裁剪 OpenSSL（路线 B 主力，ms_nc_tls_ossl.c）；
- * 否则安卓系统 SSLEngine（ms_android_tls.c，JNI）。
- * 非 Android 宿主无系统 TLS：https 诚实失败（MS_NC_E_TLS），不降级为明文、不关校验。
+ * TLS：Android 单 so 只留极致裁剪 OpenSSL（ms_nc_tls_ossl.c，MS_NC_TLS_OPENSSL）。
+ * 非 Android 宿主：https 诚实失败（MS_NC_E_TLS），不降级明文。
  * by: Long <mycjzb@gmail.com>
  */
 #ifndef _GNU_SOURCE
@@ -25,10 +24,6 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
-
-#if defined(__ANDROID__) && !defined(MS_NC_TLS_OPENSSL)
-#include "../ff/ms_android_tls.h"
-#endif
 
 #define NC_SLICE_MS 100
 #define NC_MAX_ADDRS 8
@@ -258,7 +253,7 @@ static int resolve(const ms_nc_config *cfg, const char *host, int port,
         return MS_NC_E_DNS;
     }
     for (it = ai; it && n < cap; it = it->ai_next) {
-        if (it->ai_addrlen <= sizeof(out[n])) {
+        if (it->ai_addrlen <= (socklen_t)sizeof(out[n])) {
             memset(&out[n], 0, sizeof(out[n]));
             memcpy(&out[n], it->ai_addr, it->ai_addrlen);
             n++;
@@ -487,112 +482,10 @@ int ms_nc_dial(const char *host, int port, int timeout_ms, volatile int *cancel,
 }
 
 /* ---------------- TLS 泵 ----------------
- * MS_NC_TLS_OPENSSL（路线 B 主力单 so）：由 ms_nc_tls_ossl.c 提供（极致裁剪 OpenSSL，播放/API 分策略）。
- * 否则 Android 走系统 SSLEngine（JNI），宿主诚实失败。by: Long <mycjzb@gmail.com> */
+ * MS_NC_TLS_OPENSSL：ms_nc_tls_ossl.c。否则（宿主）诚实失败。 */
 #if defined(MS_NC_TLS_OPENSSL)
 /* 实现见 ms_nc_tls_ossl.c */
-#elif defined(__ANDROID__)
-int ms_nc_tls_open2(const char *hostname, int verify, void **out_eng)
-{
-    /* 系统 SSLEngine 后端不提供关闭校验：verify=0 也按严格处理（不放行、不降级）。 */
-    (void)verify;
-    return ms_nc_tls_open(hostname, out_eng);
-}
-const char *ms_nc_tls_backend(void) { return "android-system-tls"; }
-int ms_nc_tls_set_extra_ca(const char *f, const char *d) { (void)f; (void)d; return MS_NC_E_UNSUPPORTED; }
-void ms_nc_tls_global_cleanup(void) {}
-
-int ms_nc_tls_open(const char *hostname, void **out_eng)
-{
-    return ms_android_tls_open(out_eng, hostname) == 0 ? MS_NC_OK : MS_NC_E_TLS;
-}
-
-void ms_nc_tls_close(void *eng)
-{
-    ms_android_tls_close(eng);
-}
-
-static int io_write_all(const ms_nc_io *io, const uint8_t *p, int n)
-{
-    int off = 0;
-    while (off < n) {
-        int w = io->wr(io->ctx, p + off, n - off);
-        if (w <= 0) {
-            return w < 0 ? w : MS_NC_E_IO;
-        }
-        off += w;
-    }
-    return n;
-}
-
-int ms_nc_tls_handshake(void *eng, const ms_nc_io *io)
-{
-    uint8_t buf[16384];
-    int guard = 0;
-    for (;;) {
-        int n = 0, st, r;
-        if (++guard > 4096) return MS_NC_E_TLS;
-        st = ms_android_tls_handshake(eng, buf, (int)sizeof(buf), &n);
-        if (st == 0) return MS_NC_OK;
-        if (st == 2) {
-            if (n > 0 && (r = io_write_all(io, buf, n)) < 0) return r;
-            continue;
-        }
-        if (st == 1) {
-            r = io->rd(io->ctx, buf, (int)sizeof(buf));
-            if (r <= 0) return r < 0 ? r : MS_NC_E_TLS;
-            if (ms_android_tls_feed_net(eng, buf, r) < 0) return MS_NC_E_TLS;
-            continue;
-        }
-        return MS_NC_E_TLS; /* 证书/主机名校验失败都在这里，不重试、不降级 */
-    }
-}
-
-int ms_nc_tls_read(void *eng, const ms_nc_io *io, uint8_t *buf, int cap)
-{
-    uint8_t net[16384];
-    int guard = 0;
-    for (;;) {
-        int net_n = 0, need = 0, r;
-        if (++guard > 4096) return MS_NC_E_TLS;
-        r = ms_android_tls_read(eng, buf, cap, net, (int)sizeof(net), &net_n, &need);
-        if (r > 0) return r;
-        if (r < 0) return MS_NC_E_TLS;
-        if (net_n > 0) {
-            int w = io_write_all(io, net, net_n);
-            if (w < 0) return w;
-        }
-        if (need == 1) {
-            int g = io->rd(io->ctx, net, (int)sizeof(net));
-            if (g == 0) return 0; /* 对端关闭 */
-            if (g < 0) return g;
-            if (ms_android_tls_feed_net(eng, net, g) < 0) return MS_NC_E_TLS;
-        } else if (need != 2) {
-            return 0; /* 引擎已关闭（close_notify） */
-        }
-    }
-}
-
-int ms_nc_tls_write(void *eng, const ms_nc_io *io, const uint8_t *buf, int n)
-{
-    uint8_t net[16384 + 2048];
-    int off = 0;
-    while (off < n) {
-        int net_n = 0, chunk = n - off, used;
-        if (chunk > 16384) chunk = 16384;
-        used = ms_android_tls_write(eng, buf + off, chunk, net, (int)sizeof(net), &net_n);
-        if (used < 0) return MS_NC_E_TLS;
-        if (net_n > 0) {
-            int w = io_write_all(io, net, net_n);
-            if (w < 0) return w;
-        }
-        if (used == 0 && net_n == 0) return MS_NC_E_TLS;
-        off += used;
-    }
-    return n;
-}
 #else
-/* 宿主：无系统 TLS。诚实失败，不降级明文。 */
 int ms_nc_tls_open2(const char *hostname, int verify, void **out_eng)
 {
     (void)verify;
@@ -637,6 +530,12 @@ static int conn_raw_wr(void *ctx, const uint8_t *buf, int n)
 int ms_nc_conn_open(const char *host, int port, int use_tls, int timeout_ms,
                     int io_timeout_ms, volatile int *cancel, ms_nc_conn **out)
 {
+    return ms_nc_conn_open2(host, port, use_tls, 1, timeout_ms, io_timeout_ms, cancel, out);
+}
+
+int ms_nc_conn_open2(const char *host, int port, int use_tls, int tls_verify,
+                     int timeout_ms, int io_timeout_ms, volatile int *cancel, ms_nc_conn **out)
+{
     ms_nc_conn *c;
     int r;
     if (out == NULL) return MS_NC_E_ARG;
@@ -655,7 +554,7 @@ int ms_nc_conn_open(const char *host, int port, int use_tls, int timeout_ms,
         return r;
     }
     if (use_tls) {
-        r = ms_nc_tls_open(host, &c->tls);
+        r = ms_nc_tls_open2(host, tls_verify ? 1 : 0, &c->tls);
         if (r == MS_NC_OK) {
             r = ms_nc_tls_handshake(c->tls, &c->io);
         }
@@ -1066,7 +965,11 @@ static int http_once(ms_nc_http *h, const ms_nc_req *req, const char *method,
         return r;
     }
     if (!req->headers || !hdr_has(req->headers, "User-Agent")) {
-        len += (size_t)snprintf(rq + len, cap - len, "User-Agent: MsMedia/1.0\r\n");
+        /* 对齐超级直播 UA.web：未带头时默认 Chrome，避免 CDN 掐 MsMedia/1.0 */
+        len += (size_t)snprintf(rq + len, cap - len,
+                                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36\r\n");
     }
     if (!req->headers || !hdr_has(req->headers, "Accept-Encoding")) {
         len += (size_t)snprintf(rq + len, cap - len, "Accept-Encoding: identity\r\n");
@@ -1082,7 +985,8 @@ static int http_once(ms_nc_http *h, const ms_nc_req *req, const char *method,
         return MS_NC_E_ARG;
     }
     h->pooled_conn = 0;
-    if (h->keep_alive && !(send_body && req->body_len > 0)) {
+    /* 忽略证书的连接不进池，避免与严格校验连接串台 */
+    if (h->keep_alive && !req->tls_insecure && !(send_body && req->body_len > 0)) {
         h->conn = pool_take(u->host, u->port, u->https);
         if (h->conn) {
             h->pooled_conn = 1;
@@ -1091,7 +995,8 @@ static int http_once(ms_nc_http *h, const ms_nc_req *req, const char *method,
         }
     }
     if (!h->conn) {
-        r = ms_nc_conn_open(u->host, u->port, u->https, ct, h->read_timeout_ms, h->cancelp, &h->conn);
+        r = ms_nc_conn_open2(u->host, u->port, u->https, req->tls_insecure ? 0 : 1,
+                             ct, h->read_timeout_ms, h->cancelp, &h->conn);
         if (r != MS_NC_OK) {
             free(rq);
             return r;
@@ -1109,7 +1014,8 @@ static int http_once(ms_nc_http *h, const ms_nc_req *req, const char *method,
         ms_nc_conn_close(h->conn);
         h->conn = NULL;
         h->pooled_conn = 0;
-        r = ms_nc_conn_open(u->host, u->port, u->https, ct, h->read_timeout_ms, h->cancelp, &h->conn);
+        r = ms_nc_conn_open2(u->host, u->port, u->https, req->tls_insecure ? 0 : 1,
+                             ct, h->read_timeout_ms, h->cancelp, &h->conn);
         if (r == MS_NC_OK) {
             pthread_mutex_lock(&g_pool_mu);
             g_pool_opened++;
@@ -1140,7 +1046,8 @@ static int http_once(ms_nc_http *h, const ms_nc_req *req, const char *method,
         h->conn = NULL;
         h->pooled_conn = 0;
         h->buf_off = h->buf_len = 0;
-        r = ms_nc_conn_open(u->host, u->port, u->https, ct, h->read_timeout_ms, h->cancelp, &h->conn);
+        r = ms_nc_conn_open2(u->host, u->port, u->https, req->tls_insecure ? 0 : 1,
+                             ct, h->read_timeout_ms, h->cancelp, &h->conn);
         if (r == MS_NC_OK) {
             pthread_mutex_lock(&g_pool_mu);
             g_pool_opened++;
@@ -1366,11 +1273,12 @@ void ms_nc_http_close(ms_nc_http *h)
     free(h);
 }
 
-/* ---------------- Android JNI：缓存应用类 + Java DNS ---------------- */
+/* ---------------- Android JNI：缓存 MsHttpClient（Java DNS）---------------- */
 #ifdef __ANDROID__
 #include "../hw/ms_hw_jni.h"
+#include "../obf/obf_strings.h"
+#include "../obf/obfstr.h"
 
-static jclass g_tls_cls;
 static jclass g_net_cls;
 static jmethodID g_resolve_mid;
 
@@ -1379,21 +1287,12 @@ int ms_nc_jni_init(JNIEnv *env)
     jclass c;
     if (env == NULL) return -1;
     pthread_mutex_lock(&g_mu);
-    if (g_tls_cls == NULL) {
-        c = (*env)->FindClass(env, "com/mycjzb/media/player/MsSystemTls");
-        if (c) {
-            g_tls_cls = (jclass)(*env)->NewGlobalRef(env, c);
-            (*env)->DeleteLocalRef(env, c);
-        } else {
-            (*env)->ExceptionClear(env);
-        }
-    }
     if (g_net_cls == NULL) {
-        c = (*env)->FindClass(env, "com/mycjzb/media/player/MsHttpClient");
+        c = MS_JNI_FIND_CLASS(env, CLASS_MS_HTTP);
         if (c) {
             g_net_cls = (jclass)(*env)->NewGlobalRef(env, c);
-            g_resolve_mid = (*env)->GetStaticMethodID(env, g_net_cls, "dnsResolveFromNative",
-                                                      "(Ljava/lang/String;)[Ljava/lang/String;");
+            g_resolve_mid = MS_JNI_GET_STATIC_METHOD(env, g_net_cls, METHOD_DNS_RESOLVE,
+                                                     SIG_DNS_RESOLVE);
             if (g_resolve_mid == NULL) (*env)->ExceptionClear(env);
             (*env)->DeleteLocalRef(env, c);
         } else {
@@ -1401,12 +1300,7 @@ int ms_nc_jni_init(JNIEnv *env)
         }
     }
     pthread_mutex_unlock(&g_mu);
-    return g_tls_cls ? 0 : -1;
-}
-
-jclass ms_nc_jni_tls_class(void)
-{
-    return g_tls_cls;
+    return 0;
 }
 
 static int java_dns(const char *host, int port, struct sockaddr_storage *out, int cap)

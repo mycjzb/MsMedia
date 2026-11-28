@@ -402,6 +402,8 @@ static void audio_tap_trimmed_pts(ms_hw_audio *a, const uint8_t *pcm, size_t byt
                a->pcm_bits ? a->pcm_bits : 16, has_pts, pts_us);
 }
 
+#ifndef __ANDROID__
+/* 仅宿主 mock 路径调用；Android 走 audio_tap_trimmed_pts。 */
 static void audio_tap_trimmed(ms_hw_audio *a, const uint8_t *pcm, size_t bytes)
 {
     int has_pts = 0;
@@ -415,7 +417,6 @@ static void audio_tap_trimmed(ms_hw_audio *a, const uint8_t *pcm, size_t bytes)
     (void)nsamp;
 }
 
-#ifndef __ANDROID__
 static ms_status ensure_host_buf(ms_hw_audio *a, uint8_t **p, size_t *cap, size_t need)
 {
     uint8_t *nbuf;

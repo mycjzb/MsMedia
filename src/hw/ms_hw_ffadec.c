@@ -1,8 +1,6 @@
 /*
- * 路线 B 单 so 专用：系统普遍缺失的音频（AC-3 / E-AC-3 / MP2）用 FFmpeg 内置轻量软解出 PCM，
- * 统一送 AudioTrack。只在系统 MediaCodec 没有对应解码器时启用；视频永不软解。
- * 输出 s16 交织，最多 2 声道（AC-3/E-AC-3 请求解码器内下混到立体声）。
- * 仅在 -DMS_SINGLE_FFADEC 的 single-slimff 构建中编译；冻结产物与官方多 so 不含本文件。
+ * 路线 B 单 so：常用音频 FFmpeg 软解出 PCM → AudioTrack。
+ * 只在系统 MediaCodec 没有时启用；视频永不软解。输出 s16 交织，最多 2 声道。
  * by: Long <mycjzb@gmail.com>
  */
 #include "ms_hw_ffadec.h"
@@ -25,60 +23,115 @@ struct ms_ffadec {
 
 int ms_ffadec_supported(ms_codec codec)
 {
-    return codec == MS_CODEC_AC3 || codec == MS_CODEC_EAC3 || codec == MS_CODEC_MP2 ||
+    return codec == MS_CODEC_AAC || codec == MS_CODEC_AAC_LATM ||
+           codec == MS_CODEC_MP2 || codec == MS_CODEC_MP3 ||
+           codec == MS_CODEC_AC3 || codec == MS_CODEC_EAC3 ||
+           codec == MS_CODEC_DTS || codec == MS_CODEC_DRA ||
            codec == MS_CODEC_G711_ALAW || codec == MS_CODEC_G711_ULAW ||
-           codec == MS_CODEC_DTS || codec == MS_CODEC_AAC_LATM;
+           codec == MS_CODEC_OPUS || codec == MS_CODEC_FLAC ||
+           codec == MS_CODEC_PCM ||
+           codec == MS_CODEC_VORBIS || codec == MS_CODEC_ALAC;
 }
 
 static enum AVCodecID to_id(ms_codec c)
 {
     switch (c) {
+    case MS_CODEC_AAC: return AV_CODEC_ID_AAC;
+    case MS_CODEC_AAC_LATM: return AV_CODEC_ID_AAC_LATM;
+    case MS_CODEC_MP2: return AV_CODEC_ID_MP2;
+    case MS_CODEC_MP3: return AV_CODEC_ID_MP3;
     case MS_CODEC_AC3: return AV_CODEC_ID_AC3;
     case MS_CODEC_EAC3: return AV_CODEC_ID_EAC3;
-    case MS_CODEC_MP2: return AV_CODEC_ID_MP2;
+    case MS_CODEC_DTS: return AV_CODEC_ID_DTS;
+#if defined(AV_CODEC_ID_DRA)
+    case MS_CODEC_DRA: return AV_CODEC_ID_DRA;
+#endif
     case MS_CODEC_G711_ALAW: return AV_CODEC_ID_PCM_ALAW;
     case MS_CODEC_G711_ULAW: return AV_CODEC_ID_PCM_MULAW;
-    case MS_CODEC_DTS: return AV_CODEC_ID_DTS;
-    case MS_CODEC_AAC_LATM: return AV_CODEC_ID_AAC_LATM;
+    case MS_CODEC_OPUS: return AV_CODEC_ID_OPUS;
+    case MS_CODEC_FLAC: return AV_CODEC_ID_FLAC;
+    case MS_CODEC_PCM: return AV_CODEC_ID_PCM_S16LE;
+    case MS_CODEC_VORBIS: return AV_CODEC_ID_VORBIS;
+    case MS_CODEC_ALAC: return AV_CODEC_ID_ALAC;
     default: return AV_CODEC_ID_NONE;
     }
 }
 
-int ms_ffadec_open(ms_codec codec, int rate, int ch, ms_ffadec **out)
+static int fill_ctx(AVCodecContext *ctx, ms_codec codec, int rate, int ch,
+                    const uint8_t *extra, size_t extra_n, AVDictionary **opt)
+{
+    if (rate > 0) ctx->sample_rate = rate;
+    if (ch > 0) av_channel_layout_default(&ctx->ch_layout, ch);
+    if (extra != NULL && extra_n > 0 && extra_n < (1u << 20)) {
+        ctx->extradata = (uint8_t *)av_mallocz(extra_n + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (ctx->extradata == NULL) return -1;
+        memcpy(ctx->extradata, extra, extra_n);
+        ctx->extradata_size = (int)extra_n;
+    }
+    if (codec == MS_CODEC_AC3 || codec == MS_CODEC_EAC3) {
+        av_dict_set(opt, "downmix", "stereo", 0);
+    }
+    return 0;
+}
+
+static int try_open_id(ms_ffadec *d, enum AVCodecID id, ms_codec codec, int rate, int ch,
+                       const uint8_t *extra, size_t extra_n)
 {
     const AVCodec *dec;
-    ms_ffadec *d;
     AVDictionary *opt = NULL;
-    if (out == NULL) return -1;
-    *out = NULL;
-    dec = avcodec_find_decoder(to_id(codec));
+    dec = avcodec_find_decoder(id);
     if (dec == NULL) return -1;
-    d = (ms_ffadec *)calloc(1, sizeof(*d));
-    if (d == NULL) return -1;
+    avcodec_free_context(&d->ctx);
     d->ctx = avcodec_alloc_context3(dec);
-    d->pkt = av_packet_alloc();
-    d->frm = av_frame_alloc();
-    if (d->ctx == NULL || d->pkt == NULL || d->frm == NULL) {
-        ms_ffadec_close(d);
-        return -1;
-    }
-    if (rate > 0) d->ctx->sample_rate = rate;
-    if (ch > 0) av_channel_layout_default(&d->ctx->ch_layout, ch);
-    if (codec == MS_CODEC_AC3 || codec == MS_CODEC_EAC3 || codec == MS_CODEC_DTS) {
-        av_dict_set(&opt, "downmix", "stereo", 0); /* 多声道在解码器内下混到立体声 */
-    }
-    if ((codec == MS_CODEC_G711_ALAW || codec == MS_CODEC_G711_ULAW) && (rate <= 0 || ch <= 0)) {
+    if (d->ctx == NULL) return -1;
+    if (fill_ctx(d->ctx, codec, rate, ch, extra, extra_n, &opt) != 0) {
         av_dict_free(&opt);
-        ms_ffadec_close(d);
-        return -1; /* G.711 无带内参数，缺采样率/声道不能猜 */
+        return -1;
     }
     if (avcodec_open2(d->ctx, dec, &opt) < 0) {
         av_dict_free(&opt);
-        ms_ffadec_close(d);
         return -1;
     }
     av_dict_free(&opt);
-    d->out_rate = rate > 0 ? rate : 48000;
+    return 0;
+}
+
+int ms_ffadec_open(ms_codec codec, int rate, int ch, ms_ffadec **out)
+{
+    return ms_ffadec_open_ex(codec, rate, ch, NULL, 0, out);
+}
+
+int ms_ffadec_open_ex(ms_codec codec, int rate, int ch,
+                      const uint8_t *extra, size_t extra_n, ms_ffadec **out)
+{
+    ms_ffadec *d;
+    enum AVCodecID ids[4];
+    int nids = 0, i;
+    if (out == NULL) return -1;
+    *out = NULL;
+    if (!ms_ffadec_supported(codec)) return -1;
+    if ((codec == MS_CODEC_G711_ALAW || codec == MS_CODEC_G711_ULAW || codec == MS_CODEC_PCM)
+            && (rate <= 0 || ch <= 0)) {
+        return -1;
+    }
+    ids[nids++] = to_id(codec);
+    if (ids[0] == AV_CODEC_ID_NONE) return -1;
+    d = (ms_ffadec *)calloc(1, sizeof(*d));
+    if (d == NULL) return -1;
+    d->pkt = av_packet_alloc();
+    d->frm = av_frame_alloc();
+    if (d->pkt == NULL || d->frm == NULL) {
+        ms_ffadec_close(d);
+        return -1;
+    }
+    for (i = 0; i < nids; i++) {
+        if (try_open_id(d, ids[i], codec, rate, ch, extra, extra_n) == 0) break;
+    }
+    if (i >= nids) {
+        ms_ffadec_close(d);
+        return -1;
+    }
+    d->out_rate = rate > 0 ? rate : (codec == MS_CODEC_OPUS ? 48000 : 44100);
     d->out_ch = (ch > 0 && ch < 2) ? 1 : 2;
     *out = d;
     return 0;

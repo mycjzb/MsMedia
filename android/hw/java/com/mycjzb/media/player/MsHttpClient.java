@@ -1,6 +1,7 @@
 /*
  * 标准网络请求封装：走 libmsplayer.so 里的公共可控网络层（自研 TCP/HTTP，自定义 DNS / SOCKS5，
- * HTTPS 叠加安卓系统 TLS 且保留完整证书链与主机名校验）。与播放器取流共用同一份原生实现。
+ * HTTPS 默认严格校验证书；{@link Builder#tlsInsecure(boolean)} 仅给播放拉流忽略证书）。
+ * 与播放器取流共用同一份原生实现。
  * 支持 GET/POST/PUT/DELETE/HEAD/PATCH、自定义请求头、连接/读超时、重定向（禁止 https->http 降级）、
  * 流式读取或一次性读取、任意线程取消。
  * DNS / SOCKS5 是进程级配置（播放器与本类同时生效），用 {@link #configure(NetConfig)} 设置。
@@ -95,11 +96,11 @@ public final class MsHttpClient {
         MsNativeLoader.ensure();
     }
 
-    /** 由 MsNativeLoader 在库加载后调用（Java 线程），缓存原生线程要用的类。 */
+    /** 由 MsNativeLoader 在库加载后调用（Java 线程），把 IOException 类交给 native 缓存（避免 UPX 后 FindClass 字面量漂）。 */
     public static synchronized void initFromLoader() {
         if (!sInit) {
             sInit = true;
-            nativeInit();
+            nativeInit(IOException.class);
         }
     }
 
@@ -158,11 +159,14 @@ public final class MsHttpClient {
     final int connectTimeoutMs;
     final int readTimeoutMs;
     final int maxRedirects;
+    /** true：HTTPS 不校证书（仅播放拉流）；false：严格（业务 API 默认）。 */
+    final boolean tlsInsecure;
 
     private MsHttpClient(Builder b) {
         connectTimeoutMs = b.connectTimeoutMs;
         readTimeoutMs = b.readTimeoutMs;
         maxRedirects = b.followRedirects ? b.maxRedirects : 0;
+        tlsInsecure = b.tlsInsecure;
     }
 
     public static final class Builder {
@@ -170,6 +174,7 @@ public final class MsHttpClient {
         int readTimeoutMs = 15000;
         boolean followRedirects = true;
         int maxRedirects = 5;
+        boolean tlsInsecure = false;
 
         public Builder connectTimeout(int ms) {
             if (ms <= 0) {
@@ -197,6 +202,12 @@ public final class MsHttpClient {
                 throw new IllegalArgumentException("redirects");
             }
             maxRedirects = n;
+            return this;
+        }
+
+        /** 播放拉流用 true（自签/IP HTTPS）；业务接口保持默认 false。 */
+        public Builder tlsInsecure(boolean insecure) {
+            tlsInsecure = insecure;
             return this;
         }
 
@@ -332,7 +343,12 @@ public final class MsHttpClient {
             }
             try {
                 int code = nativeExecute(h, req.method, req.url, req.headers, req.body,
-                        client.connectTimeoutMs, client.readTimeoutMs, client.maxRedirects);
+                        client.connectTimeoutMs, client.readTimeoutMs, client.maxRedirects,
+                        client.tlsInsecure);
+                if (code < 0) {
+                    release();
+                    throw new IOException("msnet execute failed");
+                }
                 return new Response(this, code, nativeHeaders(h), nativeContentLength(h));
             } catch (IOException e) {
                 release();
@@ -496,7 +512,7 @@ public final class MsHttpClient {
     }
 
     /* ------------------------- native ------------------------- */
-    static native int nativeInit();
+    static native int nativeInit(Class<?> ioExceptionClass);
 
     static native int nativeConfigure(String dnsMap, boolean javaDns, String socksHost, int socksPort,
                                       String user, String pass, boolean remoteDns);
@@ -504,7 +520,8 @@ public final class MsHttpClient {
     static native long nativeCreate();
 
     static native int nativeExecute(long h, String method, String url, String headers, byte[] body,
-                                    int connectMs, int readMs, int maxRedirects) throws IOException;
+                                    int connectMs, int readMs, int maxRedirects, boolean tlsInsecure)
+            throws IOException;
 
     static native String nativeHeaders(long h);
 

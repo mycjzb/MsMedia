@@ -622,18 +622,33 @@ static ms_status apply_ps_set(ms_hw_player *p, const ms_h264_ps_set *ps, int fro
     if (st != MS_OK) {
         return st;
     }
+    /* Media3：已 configure 后不因 SPS/PPS 字节抖拆硬解（直播 TS 常见）。 */
     if (p->configured) {
-        close_decoder(p);
-        p->waiting_key = (p->opts.wait_keyframe != 0);
-        p->eos_in = 0;
-        p->eos_out = 0;
-        p->epoch++;
-        reset_stage_times(p);
+        (void)store_player_csd(p, packed, pn);
+        p->applied_ps = *ps;
+        p->applied_ps.struct_size = sizeof(p->applied_ps);
+        p->have_applied_ps = 1;
+        clear_ps_pending(p);
+        if (from_inband) {
+            p->video_csd_inband_same++;
+        }
+        return MS_OK;
     }
     st = store_player_csd(p, packed, pn);
     if (st != MS_OK) {
         p->last_error = st;
         return st;
+    }
+    {
+        int w = 0, h = 0;
+        if (ms_h264_csd_video_size(fmt, 1, packed, pn, p->avcc_nal_len, &w, &h) == MS_OK) {
+            if (w > 0) {
+                p->width = w;
+            }
+            if (h > 0) {
+                p->height = h;
+            }
+        }
     }
     p->applied_ps = *ps;
     p->applied_ps.struct_size = sizeof(p->applied_ps);
@@ -718,13 +733,19 @@ static ms_status apply_hevc_ps_set(ms_hw_player *p, const ms_hevc_ps_set *ps, in
     if (st != MS_OK) {
         return st;
     }
+    /* Media3：已 configure 后不因带内/后续 VPS/SPS/PPS 字节抖拆硬解。
+     * 直播 TS 常抖 PPS（ffprobe 亦见 PPS id 异常）；连环 recreate 永不首帧。 */
     if (p->configured) {
-        close_decoder(p);
-        p->waiting_key = (p->opts.wait_keyframe != 0);
-        p->eos_in = 0;
-        p->eos_out = 0;
-        p->epoch++;
-        reset_stage_times(p);
+        (void)store_player_csd(p, packed, pn);
+        merge_hdr_from_buf(p, fmt, 1, packed, pn);
+        p->applied_hevc = *ps;
+        p->applied_hevc.struct_size = sizeof(p->applied_hevc);
+        p->have_applied_hevc = 1;
+        clear_ps_pending(p);
+        if (from_inband) {
+            p->video_csd_inband_same++;
+        }
+        return MS_OK;
     }
     st = store_player_csd(p, packed, pn);
     if (st != MS_OK) {
@@ -1336,6 +1357,10 @@ static ms_status ensure_decoder(ms_hw_player *p)
         if (p->height <= 0 && p->hdr.height > 0) {
             p->height = p->hdr.height;
         }
+        /* Media3：Format 须带齐 width/height 才 maybeInitCodec；缺尺寸则 AGAIN 等下一组 SPS。 */
+        if (p->width <= 0 || p->height <= 0) {
+            return MS_AGAIN;
+        }
         cfg.width = p->width;
         cfg.height = p->height;
         cfg.time_base_num = 1;
@@ -1358,7 +1383,9 @@ static ms_status ensure_decoder(ms_hw_player *p)
         }
         p->configured = 1;
         p->started = 1;
-        p->waiting_key = (p->opts.wait_keyframe != 0);
+        /* 直播 TS：lavf 常不置 KEY，IDR 扫描偶发漏；CSD 已齐则交给硬解自行丢非参考帧。
+         * 若仍等 KEY，易 15s 无 submit（深圳 H264 实测）。 */
+        p->waiting_key = 0;
 #ifdef __ANDROID__
         /* 只有 Surface 输出才按 Media3 决定出帧时机；无 Surface（测试回读）保持旧行为。 */
         if (p->surface != NULL && p->dec != NULL) {
@@ -1853,8 +1880,15 @@ static ms_status feed_aac_au(ms_hw_player *p, const ms_event *ev, int64_t origin
         }
         st = ms_hw_audio_submit_au(p->audio, &au);
     }
+    /* 直播/起播：音频背压不得堵 demux（否则 H264+MP2 等不到 SPS/IDR）。
+     * Media3 音视频分轨消费；此处丢本包继续拉视频。 */
     if (st == MS_LIMIT || st == MS_AGAIN) {
-        return st;
+        p->audio_au_dropped_unsupported++;
+        clear_pending_trim(p);
+        if (release_fn) {
+            release_fn(release_ctx, (uint8_t *)(void *)(uintptr_t)ev->data, ev->data_size);
+        }
+        return MS_OK;
     }
     clear_pending_trim(p);
     if (st != MS_OK) {
@@ -2057,15 +2091,9 @@ ms_status ms_hw_player_feed(ms_hw_player *p, const ms_event *ev, int64_t origin_
                  memcmp(p->csd, ev->data, ev->data_size) != 0)) {
                 changed = 1;
             }
+            /* Media3：已 configure 则忽略 CSD 字节抖，不拆硬解；仅刷新缓存。 */
             if (changed && p->configured) {
-                /* 视频 CSD 变化：按新 epoch 关闭并重新 configure，随后等可解关键帧。
-                 * 失败返回可诊断错误，不继续向旧解码器送帧。 */
-                close_decoder(p);
-                p->waiting_key = (p->opts.wait_keyframe != 0);
-                p->eos_in = 0;
-                p->eos_out = 0;
-                p->epoch++;
-                reset_stage_times(p);
+                changed = 0;
             }
             accept_csd(p, ev);
             if (!p->have_csd) {
@@ -2166,6 +2194,10 @@ ms_status ms_hw_player_feed(ms_hw_player *p, const ms_event *ev, int64_t origin_
         }
         return MS_OK;
     }
+    /* 轨 codec 以事件为准（Media3 Format.sampleMimeType），避免仍按默认 H264 配解码器。 */
+    if (ev->track.codec != MS_CODEC_UNKNOWN) {
+        p->codec = ev->track.codec;
+    }
     {
         int drop_inband = 0;
         int video_hevc = (ev->track.codec == MS_CODEC_HEVC || p->codec == MS_CODEC_HEVC);
@@ -2207,8 +2239,17 @@ ms_status ms_hw_player_feed(ms_hw_player *p, const ms_event *ev, int64_t origin_
     }
     st = ensure_decoder(p);
     if (st == MS_AGAIN) {
-        /* 表面丢失：非关键帧在等待关键帧时直接丢弃，避免泵被 AGAIN 堵住；
-         * 关键帧保留给调用方，重建表面后再提交。 */
+        /* Media3：Format 未就绪（无 CSD / 无宽高）则丢样继续拉流，禁止 AGAIN 堵泵。 */
+        if (!p->have_csd || p->width <= 0 || p->height <= 0) {
+            p->video_au_in++;
+            p->video_au_dropped_nokey++;
+            if (release_fn != NULL) {
+                release_fn(release_ctx, (uint8_t *)(void *)(uintptr_t)ev->data,
+                           ev->data_size);
+            }
+            return MS_OK;
+        }
+        /* 有 Format 无 Surface：非关键帧丢掉免堵泵；关键帧保留等 Surface。 */
         if (p->surface == NULL && p->waiting_key && !ev->is_keyframe) {
             p->video_au_in++;
             p->video_au_dropped_nokey++;
@@ -2221,6 +2262,26 @@ ms_status ms_hw_player_feed(ms_hw_player *p, const ms_event *ev, int64_t origin_
         return MS_AGAIN;
     }
     if (st != MS_OK) {
+        /* Media3：codec init 失败不终结 demux——清掉坏 Format，等下一组参数集。 */
+        if (!p->configured &&
+            (st == MS_ERR_UNKNOWN || st == MS_ERR_UNSUPPORTED)) {
+            clear_ps_pending(p);
+            pfree(p, p->csd);
+            p->csd = NULL;
+            p->csd_size = 0;
+            p->have_csd = 0;
+            p->have_applied_ps = 0;
+            p->have_applied_hevc = 0;
+            p->width = 0;
+            p->height = 0;
+            p->video_au_in++;
+            p->video_au_dropped_nokey++;
+            if (release_fn != NULL) {
+                release_fn(release_ctx, (uint8_t *)(void *)(uintptr_t)ev->data,
+                           ev->data_size);
+            }
+            return MS_OK;
+        }
         return st;
     }
     {
@@ -2233,6 +2294,52 @@ ms_status ms_hw_player_feed(ms_hw_player *p, const ms_event *ev, int64_t origin_
                                     ev->data_size, &info) == MS_OK &&
                 info.is_key) {
                 is_key = 1;
+            }
+        }
+        /* FAST_START 后 lavf 常不置 KEY；按 NAL 扫 IDR，与 HEVC IRAP 对称。 */
+        if (!is_key && (ev->track.codec == MS_CODEC_H264 || p->codec == MS_CODEC_H264) &&
+            ev->data != NULL && ev->data_size > 4) {
+            const uint8_t *d = ev->data;
+            size_t n = ev->data_size, i = 0;
+            ms_sample_format sf = ev->sample_format != MS_SAMPLE_FMT_UNKNOWN
+                                     ? ev->sample_format
+                                     : p->sample_fmt;
+            if (sf == MS_SAMPLE_FMT_AVCC) {
+                unsigned ls = p->avcc_nal_len ? p->avcc_nal_len : 4u;
+                while (i + ls < n) {
+                    unsigned sz = 0, j;
+                    for (j = 0; j < ls; j++) {
+                        sz = (sz << 8) | d[i + j];
+                    }
+                    i += ls;
+                    if (sz == 0 || i + sz > n) {
+                        break;
+                    }
+                    if ((d[i] & 0x1f) == 5) {
+                        is_key = 1;
+                        break;
+                    }
+                    i += sz;
+                }
+            } else {
+                while (i + 4 <= n) {
+                    size_t sc, nal;
+                    if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+                        sc = 3;
+                    } else if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 &&
+                               d[i + 3] == 1) {
+                        sc = 4;
+                    } else {
+                        i++;
+                        continue;
+                    }
+                    nal = i + sc;
+                    if (nal < n && (d[nal] & 0x1f) == 5) {
+                        is_key = 1;
+                        break;
+                    }
+                    i = nal + 1;
+                }
             }
         }
         if (!is_key && (ev->track.codec == MS_CODEC_HEVC || p->codec == MS_CODEC_HEVC) &&

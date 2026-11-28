@@ -1,0 +1,38 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+/* Media3 传递依赖仓：与共享源码同目录（bs-p2p/third_party/media3-m2；MS_MEDIA3_SRC 可覆盖源码位置） */
+def media3M2 = new File(file(System.getenv('MS_MEDIA3_SRC') ?: '../../../bs-p2p/third_party/media3-src'), '../media3-m2')
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        exclusiveContent {
+            forRepository {
+                maven { url = media3M2.toURI() }
+            }
+            filter {
+                includeGroupByRegex 'androidx\\..*'
+                includeGroup 'com.google.guava'
+                includeGroup 'com.google.errorprone'
+                includeGroup 'org.checkerframework'
+                includeGroup 'com.google.code.findbugs'
+                includeGroup 'com.google.j2objc'
+                includeGroup 'org.jetbrains.kotlin'
+                includeGroup 'org.jetbrains'
+            }
+        }
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "MsM3"
+
+/* 唯一 SDK 模块：Media3 Java 源码已并进 :msplayer（见 msplayer/build.gradle srcDirs） */
+include ':msplayer'
+project(':msplayer').projectDir = new File(settingsDir, '../msplayer')
+
+include ':app'

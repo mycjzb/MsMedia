@@ -133,7 +133,12 @@ typedef enum ms_codec {
     /* 加法（单 so 路线 B 音频兜底）：DTS 与 AAC-LATM(LOAS)。旧值不变；
      * 官方多 so 不产出这两个值，只有 single-slimff 的 ms_ff 映射与 FFmpeg 内置软解使用。 */
     MS_CODEC_DTS,
-    MS_CODEC_AAC_LATM
+    MS_CODEC_AAC_LATM,
+    /* 加法：国标 DRA（对齐超级直播 libaliiptv 音频软解清单）。旧值不变。 */
+    MS_CODEC_DRA,
+    /* 加法：常用音频软解兜底（Media3 FfAdec）。旧值不变。无 WMA：无 ASF demux。 */
+    MS_CODEC_VORBIS,
+    MS_CODEC_ALAC
 } ms_codec;
 
 /*

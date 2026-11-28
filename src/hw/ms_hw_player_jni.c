@@ -13,7 +13,7 @@
 #ifdef MS_HW_HAVE_FF
 #include "msmedia/ms_ff.h"
 #endif
-#ifdef MS_SINGLE_SO
+#if defined(MS_SINGLE_SO) && !defined(MS_SINGLE_FFADEC)
 #include "../netsrc/ms_netsrc.h"
 #include "../core/ms_probe.h"
 #endif
@@ -87,15 +87,19 @@ typedef struct player_jni {
     jobject pending_jsurf;  /* 与 pending_win 一起入队 */
     int has_pending_surface;
     /* 加法（单 so MediaPlayer 用；多 so 构建不读）：会话进度与循环。 */
+#if defined(MS_SINGLE_SO) && !defined(MS_SINGLE_FFADEC)
     ms_session *sess;       /* 本地路径会话（仅 worker 线程使用） */
+#endif
     atomic_int mp_opened;   /* 1=已打开并识别（prepare 完成条件） */
     atomic_int mp_done;     /* 每结束一个会话 +1 */
     atomic_int mp_active;   /* 1=worker 正在跑 kind 1/2 会话（stop 后 Java 等它归零再 prepare） */
     atomic_int mp_looping;
 #ifdef MS_SINGLE_SO
+#if !defined(MS_SINGLE_FFADEC)
     /* 加法：纯自研网络/容错输入（路线 A URL、本地 MKV/PS/伪装头文件）。由 mu 保护指针，取消线程安全。 */
     ms_netsrc *ns;
-    int ns_ahead_ms;        /* 0=默认 10000 */
+#endif
+    int ns_ahead_ms;        /* 0=默认 10000；FFADEC 仅作缓冲水位兼容字段 */
     long ns_max_bytes;      /* 0=默认 16 MiB */
     /* 阶段 6（路线 B）：Media3 风格缓冲水位（buf_set=0 时由 setPreloadConfig 推导或用默认）与播放 TLS 策略。 */
     int buf_set;
@@ -468,7 +472,7 @@ static void request_stop_io(player_jni *pj)
         (void)ms_ff_cancel(pj->ff);
     }
 #endif
-#if defined(MS_SINGLE_SO) && !defined(MS_HW_HAVE_FF)
+#if defined(MS_SINGLE_SO) && !defined(MS_HW_HAVE_FF) && !defined(MS_SINGLE_FFADEC)
     pthread_mutex_lock(&pj->mu);
     if (pj->ns) {
         ms_netsrc_cancel(pj->ns); /* 线程安全；阻塞中的网络读写 ≤100ms 返回 */
@@ -499,10 +503,9 @@ static int has_pending_cmds(player_jni *pj)
 static ms_status feed_retry_jni(player_jni *pj, const ms_event *ev, int64_t origin)
 {
     ms_status st = MS_AGAIN;
-    /* 原实现最多 64 次且 LIMIT 不休眠：输入队列满时约数毫秒就放弃 demux。
-     * 模拟器/慢设备上会出现 au 只进一半、worker 退出后不再 drive、无 OUTPUT_RENDERED。
-     * 一直等到成功或 stop（界面销毁/换片会置 stop），LIMIT/AGAIN 都让出时间片并 drive。
-     * 背压等待期间必须让出待处理的 seek/选轨，否则命令“已排队但永远不提交”。 */
+    int spins = 0;
+    /* LIMIT/AGAIN 时 drive+重试；起播前限制自旋，避免音频/坏 CSD 堵死 demux（H264 直播无首帧）。
+     * 背压等待期间必须让出待处理的 seek/选轨。 */
     while (!atomic_load(&pj->stop)) {
         pthread_mutex_lock(&pj->op);
         st = ms_hw_player_feed(pj->p, ev, origin, NULL, NULL);
@@ -518,6 +521,10 @@ static ms_status feed_retry_jni(player_jni *pj, const ms_event *ev, int64_t orig
         }
         if (has_pending_cmds(pj)) {
             return MS_AGAIN;
+        }
+        /* ~40ms：仍 LIMIT/AGAIN 则丢本包继续拉，避免起播被少数 AU 吃光预算。 */
+        if (++spins >= 5) {
+            return MS_OK;
         }
         usleep(8000);
     }
@@ -647,7 +654,7 @@ static int apply_pending_seek(player_jni *pj)
             note_ff_seek_range(pj);
         }
 #endif
-#if defined(MS_SINGLE_SO) && !defined(MS_HW_HAVE_FF)
+#if defined(MS_SINGLE_SO) && !defined(MS_HW_HAVE_FF) && !defined(MS_SINGLE_FFADEC)
         if (pj->sess != NULL) {
             st = ms_session_seek(pj->sess, t);
             if (st != MS_OK) {
@@ -1062,7 +1069,7 @@ static void run_one_url(player_jni *pj, char *url, const char *ca, int timeout_m
 }
 #endif /* MS_HW_HAVE_FF */
 
-#if defined(MS_SINGLE_SO) && !defined(MS_HW_HAVE_FF)
+#if defined(MS_SINGLE_SO) && !defined(MS_HW_HAVE_FF) && !defined(MS_SINGLE_FFADEC)
 /* 纯自研网络/容错输入：URL（http/https/HLS/DASH/udp/rtp/rtmp/rtsp）或 file://（本地 MKV/PS/伪装头）。
  * ms_netsrc 独立线程下载/预加载，本线程把字节推进 session 并喂播放器。不记录 URL。 */
 static void run_one_net(player_jni *pj, char *url)
@@ -1273,6 +1280,14 @@ static void run_one_path(player_jni *pj, char *path)
     memcpy(u + 5, path, l + 1);
     free(path);
     run_one_url(pj, u, "", 15000); /* run_one_url 负责释放 u，不记录路径 */
+}
+#elif defined(MS_SINGLE_SO) && defined(MS_SINGLE_FFADEC)
+/* msm3：解封装归 Media3；本 so 只提供 AVIO/ADEC，JNI 播控 demux 路径关闭。 */
+static void run_one_path(player_jni *pj, char *path)
+{
+    begin_session(pj);
+    set_last(pj, "UNSUPPORTED: msm3 uses Media3; native demux removed");
+    free(path);
 }
 #elif defined(MS_SINGLE_SO)
 /* 单 so：本地文件走 ms_file_source + ms_session_drive（有界读、不整文件进内存），
@@ -1623,6 +1638,12 @@ static void *session_worker(void *arg)
         } else if (kind == 1) {
 #ifdef MS_HW_HAVE_FF
             run_one_url(pj, loc, ca, timeout);
+#elif defined(MS_SINGLE_FFADEC)
+            (void)ca;
+            (void)timeout;
+            begin_session(pj);
+            set_last(pj, "UNSUPPORTED: msm3 uses Media3; native demux removed");
+            free(loc);
 #elif defined(MS_SINGLE_SO)
             (void)ca;
             (void)timeout;
@@ -1779,7 +1800,6 @@ Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeSetSurface(JNIEnv *env, jo
 {
     player_jni *pj = pj_from(h);
     char buf[256];
-    ms_status st;
     (void)thiz;
     if (pj == NULL || pj->p == NULL) {
         return (*env)->NewStringUTF(env, "no player");
@@ -1887,8 +1907,6 @@ Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeOpenUrl(JNIEnv *env, jobje
                                                   jstring jca, jint timeout_ms)
 {
     player_jni *pj = pj_from(h);
-    const char *url = NULL;
-    const char *ca = NULL;
     (void)thiz;
     if (pj == NULL || pj->p == NULL) {
         return (*env)->NewStringUTF(env, "no player");
@@ -1901,6 +1919,8 @@ Java_com_mycjzb_media_player_MsHwPlayerActivity_nativeOpenUrl(JNIEnv *env, jobje
 #else
     {
         int q;
+        const char *url = NULL;
+        const char *ca = NULL;
         char ca_buf[512];
         ca_buf[0] = 0;
         if (jurl) {

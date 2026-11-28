@@ -56,11 +56,15 @@ fi
 GPGLOG="$OPENSSL_ROOT/gpg-verify.log"
 mkdir -p "$(dirname "$GPGLOG")"
 gpg --import "$CACHE/openssl-pubkeys.asc" >/dev/null 2>&1 || true
-if ! gpg --verify "$CACHE/openssl-3.5.9.tar.gz.asc" "$CACHE/openssl-3.5.9.tar.gz" 2>"$GPGLOG"; then
-  echo "error: gpg --verify failed; see $GPGLOG" >&2
-  exit 1
+# LANG=C：中文 locale 会输出「完好的签名」，下面的 Good signature 匹配会误杀。
+if ! LANG=C gpg --verify "$CACHE/openssl-3.5.9.tar.gz.asc" "$CACHE/openssl-3.5.9.tar.gz" 2>"$GPGLOG"; then
+  # 未信任钥时 exit≠0，但文案仍可能是 Good signature；以文案为准。
+  if ! grep -qE 'Good signature|完好的签名' "$GPGLOG"; then
+    echo "error: gpg --verify failed; see $GPGLOG" >&2
+    exit 1
+  fi
 fi
-if ! grep -q "Good signature" "$GPGLOG"; then
+if ! grep -qE 'Good signature|完好的签名' "$GPGLOG"; then
   echo "error: PGP signature not good; see $GPGLOG" >&2
   exit 1
 fi

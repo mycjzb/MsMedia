@@ -31,11 +31,12 @@ typedef void (*ms_ff_log_fn)(void *ctx, int level, const char *msg);
 #define MS_FF_PROBE_DEFAULT 0
 #define MS_FF_PROBE_FAST_START 1
 
-/* FAST_START 有界值：不是 0，不是关闭音轨。官方默认 analyzeduration 为 5s。 */
-#define MS_FF_FAST_ANALYZEDURATION_US 400000
-#define MS_FF_FAST_PROBESIZE 524288
-#define MS_FF_FAST_MAX_PROBE_PACKETS 48
-#define MS_FF_FAST_PROBE_DEADLINE_MS 500
+/* FAST_START 有界值：不是 0，不是关闭音轨。官方默认 analyzeduration 为 5s。
+ * 过短时直播 H264 常 unspecified size，带内补 SPS 又被背压拖死。 */
+#define MS_FF_FAST_ANALYZEDURATION_US 1500000
+#define MS_FF_FAST_PROBESIZE 1572864
+#define MS_FF_FAST_MAX_PROBE_PACKETS 96
+#define MS_FF_FAST_PROBE_DEADLINE_MS 1500
 
 MSMEDIA_API void ms_ff_limits_default(ms_ff_limits *out);
 

@@ -25,7 +25,7 @@ public final class MsNativeLoader {
             return false;
         }
         try {
-            // 触发 MsHttpClient 类初始化并缓存 MsSystemTls / DNS 回调类；失败不影响本地播放。
+            // 触发 MsHttpClient 初始化并缓存 DNS 回调类；失败不影响本地播放。
             com.mycjzb.media.player.MsHttpClient.initFromLoader();
         } catch (Throwable ignored) {
         }

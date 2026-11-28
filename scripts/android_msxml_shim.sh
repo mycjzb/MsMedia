@@ -5,7 +5,8 @@
 # by: Long <mycjzb@gmail.com>
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-NDK="${ANDROID_NDK_HOME:-/home/box/.local/android-ndk-r29}"
+source "$ROOT/scripts/android_env.sh"
+NDK="$MS_NDK"
 API="${ANDROID_API:-21}"
 PB="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 ABIS="${ABIS:-armeabi-v7a arm64-v8a x86_64 x86}"
@@ -20,7 +21,7 @@ for abi in $ABIS; do
   p="$ROOT/build/$tag/msxml-shim/prefix"
   rm -rf "$p"; mkdir -p "$p/lib/pkgconfig" "$p/include"
   cp -r "$ROOT/src/xml/include/libxml2" "$p/include/"
-  "$cc" $arch -fPIC ${XML_OPT:--Oz} -ffunction-sections -fdata-sections -fvisibility=hidden -Wall -Wextra \
+  "$cc" $arch -fPIC ${XML_OPT:--Os} -ffunction-sections -fdata-sections -fvisibility=hidden -Wall -Wextra \
     -I"$ROOT/src/xml/include/libxml2" -c "$ROOT/src/xml/ms_xml.c" -o "$p/lib/ms_xml.o"
   "$PB/llvm-ar" rcs "$p/lib/libxml2.a" "$p/lib/ms_xml.o"
   rm -f "$p/lib/ms_xml.o"

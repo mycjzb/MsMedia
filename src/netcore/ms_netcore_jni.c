@@ -15,10 +15,16 @@ typedef struct nc_call {
     ms_nc_http *h;
 } nc_call;
 
+/* Java 传入 IOException.class → GlobalRef；工作线程只用缓存（UPX 后勿再 FindClass 字面量）。 */
+static jclass g_ioex;
+
 static void throw_io(JNIEnv *env, int code)
 {
-    jclass c = (*env)->FindClass(env, "java/io/IOException");
+    jclass c;
     char msg[96];
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (g_ioex == NULL) return;
+    c = (*env)->NewLocalRef(env, g_ioex);
     if (c == NULL) return;
     if (code == MS_NC_E_CANCELED) {
         snprintf(msg, sizeof(msg), "Canceled");
@@ -42,9 +48,12 @@ static void copy_jstr(JNIEnv *env, jstring s, char *dst, size_t cap)
 }
 
 JNIEXPORT jint JNICALL
-Java_com_mycjzb_media_player_MsHttpClient_nativeInit(JNIEnv *env, jclass cls)
+Java_com_mycjzb_media_player_MsHttpClient_nativeInit(JNIEnv *env, jclass cls, jclass ioex)
 {
     (void)cls;
+    if (g_ioex == NULL && ioex != NULL) {
+        g_ioex = (jclass)(*env)->NewGlobalRef(env, ioex);
+    }
     return ms_nc_jni_init(env);
 }
 
@@ -82,7 +91,7 @@ JNIEXPORT jint JNICALL
 Java_com_mycjzb_media_player_MsHttpClient_nativeExecute(JNIEnv *env, jclass cls, jlong handle,
                                                 jstring method, jstring url, jstring headers,
                                                 jbyteArray body, jint connectMs, jint readMs,
-                                                jint maxRedirects)
+                                                jint maxRedirects, jboolean tlsInsecure)
 {
     nc_call *c = (nc_call *)(intptr_t)handle;
     ms_nc_req rq;
@@ -115,6 +124,7 @@ Java_com_mycjzb_media_player_MsHttpClient_nativeExecute(JNIEnv *env, jclass cls,
     rq.connect_timeout_ms = connectMs;
     rq.read_timeout_ms = readMs;
     rq.max_redirects = maxRedirects;
+    rq.tls_insecure = tlsInsecure ? 1 : 0;
     rq.cancel = &c->cancel;
     r = (u != NULL) ? ms_nc_http_open(&rq, &c->h) : MS_NC_E_NOMEM;
     if (b) (*env)->ReleaseByteArrayElements(env, body, b, JNI_ABORT);

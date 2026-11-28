@@ -4,6 +4,410 @@ by: Long <mycjzb@gmail.com>
 
 时间一律使用北京时间（UTC+8）。
 
+## 2026-11-27 Asia/Shanghai — libtvcore.so 收进 AAR（SDK 自带，宿主零配置）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（源码 + so 已就位；待用户重编 AAR）
+
+**背景**
+上一轮只把 TVBus 的 Java/C 收进 SDK，`libtvcore.so` 仍要宿主自己塞进 `jniLibs`，
+等于宿主还要知道「SDK 内部有个 tvbus 引擎」。既然 `sop://` 已做成与 rtmp 同语义，
+so 也应随 AAR 走。
+
+**改动**
+- `libtvcore.so` 放入 **`android/msplayer/src/main/jniLibs/{armeabi-v7a,arm64-v8a}/`**
+  - 来源：`bs-mycjzb/app/src/main/jniLibs/`（SPGV_654，未 UPX）
+  - v7a 3,059,360 / v8a 3,812,312
+  - **不要**放 `android/msm3/app/src/main/jniLibs/`：`scripts/build_msm3.sh:81`
+    每轮 `rm -rf` 该目录再拷 `libmsplayer.so`，放进去会被清掉
+- `android/msplayer/build.gradle`：
+  `jniLibs.srcDirs = ['src/main/jniLibs', '../msm3/app/src/main/jniLibs']`
+  —— 前者放仓库内固定第三方 so（不会被 so 编译脚本清），后者放每轮编出来的
+  `libmsplayer.so`
+- `tvbus/TvbusSession.java`：新增 `loadEngine(Context)`，把「为什么没起来」说清楚：
+  1. `MsTvbus.isAvailable()` 为 false → 老 so 没有加载器 JNI
+  2. `nativeLibraryDir/libtvcore.so` 不是文件 → 明确提示
+     「host must set extractNativeLibs/useLegacyPackaging=true」
+  3. `MsTvbus.load` 失败 → hook / RegisterNatives 失败
+  - 成功时打 `tvbus engine ready: <path>`
+  - 新增 `TAG = "MsTvb"`
+- `docs/SDK接入指南.md`
+  - §3 接入步骤新增第 5 条：`extractNativeLibs` / `useLegacyPackaging` 必须 true，
+    附原因（需文件路径 dlopen 才能在 JNI_OnLoad 前 patch 签名校验）与失败日志样例
+  - 明确「宿主 jniLibs 不要再放 libtvcore.so，否则与 AAR 同名冲突」
+  - §4 新增 §4.1 `sop://` / `tvbus://` 用法（与 rtmp 完全一致）
+  - §9 协议表补 `sop/tvbus`
+
+**用途（反推）**
+- 谁用：接入本 SDK 的业务方。
+- 何时：首次集成、或换成 `sop://` 源。
+- 不做：每个宿主都要自己找 so、自己放 jniLibs、自己踩 extractNativeLibs 的坑，
+  而且漏放时 SDK 只会静默不支持。
+
+**验证**
+- `javac`（android-36 + 预编 media3）：`MsTvbus` / `MsNativeLoader` /
+  `TVCore` / `TVListener` / `TvbUrl` / `TvbusSession` 全部通过
+- **踩坑记录**：首次把 so 放进 `android/msm3/app/src/main/jniLibs/`，随后
+  `build_msm3.sh` 的 `rm -rf` 把它清掉了（目录 mtime 变新、只剩 `libmsplayer.so`）。
+  故改为 `android/msplayer/src/main/jniLibs/` + 双 srcDirs。
+- 真机未验
+
+**体积**
+- AAR：+3.0MB(v7a) +3.8MB(v8a) ≈ **+6.9MB**
+- 宿主 APK：基本不变（原先宿主自己带同样的 so）
+
+**宿主配合（DIYP）**
+- 必须删除宿主的副本，否则 duplicate：
+  `app/src/armeabi/jniLibs/armeabi-v7a/libtvcore.so`
+  `app/src/main/jniLibs/arm64-v8a/libtvcore.so`
+
+**边界**
+- 未做「从 APK zip 直读加载」（`android_dlopen_ext` + `ANDROID_DLEXT_USE_ZIPFILE_FD`）。
+  该方式可让宿主不设 `extractNativeLibs`，但会引入 16K 页对齐 / APK 内 mmap 的额外风险，
+  当前按用户决定只要求 `extractNativeLibs=true` 并在文档写清。
+- `libtvcore.so` 为第三方商业 so，随 SDK 分发属商务授权范围，技术侧不做限制。
+
+## 2026-11-27 Asia/Shanghai — TVBus 收进 MsMedia：sop:// 与 rtmp 同语义
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：源码完成（待用户重编 so / AAR）
+
+**背景**
+上一轮把 TVBus 的 Java 层放在 DIYP，导致宿主必须自己管 TVCore 初始化、起播、
+换台收会话、探活；`sop://` 也进不了 MsMedia 统一的播放链路。用户要求收进 SDK，
+与 rtmp 一样「只要是地址就能播，stop/换台跟着播放器生命周期走」。
+
+**改动**
+- 新增 `android/hw/java/com/tvbus/engine/TVCore.java`、`TVListener.java`
+  - 包名/类名固定 `com.tvbus.engine.*`：`ms_tvb.c` 的 `RegisterNatives` 按此全名绑定
+  - 不自 load so，靠 `MsTvbus.isReady()` 前置判断
+- 新增 `android/hw/java/com/mycjzb/media/player/tvbus/TvbUrl.java`
+  - `tvbus://<base58>` → `sop://`（base58 → 删 4 字节密钥 → DES-ECB）
+- 新增 `android/hw/java/com/mycjzb/media/player/tvbus/TvbusSession.java`
+  - `isTvbusUrl` / `resolve(ctx, url)` / `stop()`
+  - 引擎线程：`setPlayPort/setServPort/setRunningMode → init → run`（阻塞、daemon）
+  - 等 `onInited` → `start(sop)` → 等 `onPrepared`；优先 hls，超时退 mpegts
+  - 端口 7892 起找空位
+- `MediaPlayer.java`
+  - 新增字段 `tvbusActive`
+  - `prepareAsync` SHW 分支：`isTvbusSourceLocked()` 为真 → `prepareTvbusAsyncLocked(gen)`
+    后台解析成本机 http，再回主线程 `bindShwSourceLocked + shw.prepareAsync()`
+  - `stopTvbusLocked()`：`releaseShwLocked()` 与 `reset()` 各调一次
+  - 换台（再次 `setDataSource` → `setSourceInternal` → `releaseShwLocked`）自动停旧会话
+- `MsTvbus.java`：新增 `isAvailable()`（老 so 无 JNI 符号时返回 false）
+- `android/msplayer/consumer-rules.pro`：keep `com.tvbus.engine.**`、
+  `com.mycjzb.media.player.tvbus.**`、`MsTvbus`
+
+**用途（反推）**
+- 谁用：所有播 `sop://` / `tvbus://`（TVBus / SOPCast P2P）的业务方。
+- 何时：`setDataSource("sop://...")` + `prepareAsync()`，与 rtmp 完全同构。
+- 不做：宿主各写一套 TVCore 生命周期，容易漏 stop 导致引擎常驻；且 `sop://`
+  在 SDK 外被特判，无法复用统一的起播/恢复/统计。
+
+**验证**
+- `javac`（android-36 + 预编 media3 classes）：
+  `TVCore` / `TVListener` / `TvbUrl` / `TvbusSession` **全部通过**
+- 真机未验（需重编 so + 换 AAR）
+
+**宿主侧（DIYP）配合**
+- 已删除 `LivePlayActivity` 的 tvbus 特判分支
+- 已删除宿主 proguard 的 tvbus keep（改由 AAR consumer-rules 提供）
+- 需宿主删除与其同名的本地副本（否则 duplicate class）：
+  `com/tvbus/engine/TVCore.java`、`TVListener.java`、
+  `player/live/TvbSession.java`、`TvbUrl.java`、`LiveTvbusPlay.java`、`MsTvbusBridge.java`
+
+## 2026-11-27 Asia/Shanghai — TVBus 加载器接口（ms_tvb）进 libmsplayer.so
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：源码完成（待用户重编 so / AAR）
+
+**背景**
+DIYP 的 `libtvcore.so` 是 **SPGV_651 UPX 压壳、仅 v7a**；超级直播用 **SPGV_654 未压、
+v7a 3,059,360 / v8a 3,812,312**。且 DIYP 侧 `com.tvbus.engine.TVCore` 这个类从来没有过，
+so 里的 JNI 无人可绑 → `sop://` / `tvbus://` 完全不可用。
+
+不能直接 `System.loadLibrary("tvcore")`，三条理由：
+1. tvcore 会校验宿主 App 签名（16 字节 memcmp），必须在它的 `JNI_OnLoad` **之前**换掉 GOT；
+2. `dlopen` 不自动调 `JNI_OnLoad`，需手动调用并 `RegisterNatives`；
+3. 个别设备 / native bridge 上 dlopen 会 SIGBUS/SIGABRT，要软捕获，不能拖死主 so。
+
+**改动**
+- 新增 `include/msmedia/ms_tvb.h`：`ms_tvb_load_file(vm, path)` / `ms_tvb_ok()`
+- 新增 `src/guard/ms_tvb.c`（移植自 `bs-player/jni/p2p-m3/src/ms_tvb.c`，去掉内嵌 blob 分支）：
+  - `dlopen_soft`：SIGBUS/SIGSEGV/SIGABRT + `sigsetjmp` 软捕获
+  - `patch_memcmp`：按 ELF 动态表定位 `memcmp` 的 PLT GOT 槽换成 hook；hook 仅在返回地址落在
+    `TVCore_initialise` 起 0x400 字节内且长度为 16 时返回 0（放行签名校验）
+  - `stub_signhash`：native bridge / Berberis 上把 `getSignHashCode` 入口改成 `ret`
+  - `run_soft(JNI_OnLoad)` → `RegisterNatives` 到 `com/tvbus/engine/TVCore`（25 个方法）
+- 新增 `src/guard/ms_tvb_jni.c`：`MsTvbus.nativeLoad(path)` / `nativeReady()`
+- 新增 `android/hw/java/.../MsTvbus.java`：幂等加载；失败不反复 dlopen（避免反复 SIGBUS）
+- `src/single/libmssingle.map`：导出 `Java_com_mycjzb_media_player_MsTvbus_*`
+- `scripts/android_single_build.sh`：slimff/ADEC 清单加 `ms_tvb.c`、`ms_tvb_jni.c`
+
+**用途（反推）**
+- 谁用：播 `sop://` / `tvbus://`（TVBus / SOPCast P2P）源的用户。
+- 何时：点台起播；引擎出本地 `http://127.0.0.1:<port>/...` 后交给 MsMedia。
+- 不做：这类源整段不可播；且原包缺 arm64 版本，64 位盒子上没有退路。
+
+**验证**
+- `clang --target=armv7a-linux-androideabi21` 与 `aarch64-linux-android21`，
+  `-fsyntax-only -Wall -Wextra`：`ms_tvb.c` / `ms_tvb_jni.c` **均无告警**
+- 真机未验（需重编 so + 换 AAR）
+
+**边界**
+- 未做 `MS_TVB_EMBED`（内嵌 blob）：so 随 APK `jniLibs` 交付，按绝对路径加载。
+- 未做 `ms_engine_set_params`（Lua 下发 suffix/auth）：DIYP 不接 tvbus 鉴权链。
+- `memcmp` hook 只作用于 `TVCore_initialise` 附近，不影响其它模块。
+
+## 2026-11-27 Asia/Shanghai — RTMP 坑：按超级直播修（15s 断流 / EADDRNOTAVAIL / FLV 编码）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（源码；待用户重编 so / AAR）
+
+**改动**
+- `src/ff/ms_ff_io.c`（Media3 DataSource 的 FFmpeg AVIO）：
+  1. deadline 由「会话寿命」改为**每次阻塞 I/O 重新起算**（`arm_deadline` 在 open/read/seek 前调用）。
+     原来 open 后不再重置，播满 timeout 就被自己的 interrupt 打断，rtmp/rtsp 报 EIO(-5)，表现每 15s 断一次。
+  2. rtmp/rtmps/rtmpt/rtmpe **不再传 `timeout`**；`listen_timeout` 任何协议都不再传。
+     FFmpeg rtmp 的 `timeout` 单位是 `listen_timeout`，>0 会置 `rt->listen=1`，tcp 带 `?listen`
+     去 bind 服务器地址 → `EADDRNOTAVAIL(-99)`。保留 `rw_timeout`。
+  3. `rtsp_transport` 只对 rtsp/rtsps 设：先 `tcp`，失败退 `udp`；其它协议不传。
+  4. 头映射（同超级直播）：`ms_ff_io_open_ex(..., headers)` 新增；rtmp 的 Referer→`rtmp_pageurl`、
+     swfUrl→`rtmp_swfurl`、flashVer/Flash 形态 UA→`rtmp_flashver`（FFmpeg 不认通用 `headers` 串）；
+     rtsp 只取 `user_agent`；udp/rtp 一律不设。`ms_ff_io_open` 保持原签名（= _ex(NULL)），ABI 不变。
+  5. open 失败按 `FfIo` tag 打 url + errno 文本（同超级直播的诊断日志）。
+- `src/ff/ms_ff.c`：`url_is_rtmp` 补 `rtmpe`；`url_is_live_unseekable_proto` 补 `rtsps`。
+- `android/hw/java/.../FfIo.java`：新增 `nativeOpenEx(url, timeoutMs, headers)`（旧 `nativeOpen` 保留）。
+- `android/hw/java/.../FfDataSource.java`：Factory 增加 `setDefaultRequestProperties`；open 时把
+  Factory 默认头 + `DataSpec.httpRequestHeaders` 拼成 `"Name: value\r\n"` 交给 `nativeOpenEx`。
+- `android/hw/java/.../PlaySources.java`：rtmp/rtsp/udp/rtp 的 `FfDataSource.Factory` 接上 `requestHeaders`
+  （此前这些协议的头被静默丢弃）。
+- `third_party/media3-src/.../extractor/flv/VideoTagPayloadReader.java`、`AudioTagPayloadReader.java`：
+  与 `bs-p2p/third_party/media3-src` 同步（同一 Media3 1.4.1 基线，仅这两个文件不同）——
+  FLV 视频补 codec 12 HEVC / 13 AV1 / 14 VP9 与 Enhanced RTMP v2（FOURCC `avc1/hvc1/av01/vp09/vp08`、
+  ModEx 跳过、Multitrack 明确拒绝、组合时间规则）；音频补 E-RTMP `SoundFormat==9`
+  （Opus / mp4a / ac-3 / ec-3 / fLaC）与无顺序头的 AC-3/E-AC-3 syncframe 反推。
+
+**用途（反推）**
+- 谁用：播 rtmp（浙江 4K/省台 CAV、云商 RTMP/HTTP-FLV）的盒子与内置播放器。
+- 何时：连续看 >15s（断流）；或源站按 Referer/页面来源校验（连不上/握手被拒）；或 FLV 里是
+  HEVC/AV1/VP9、AC-3/E-AC-3/FLAC/Opus（README 说“支持 rtmp”，实际 Media3 档一概
+  `UnsupportedFormatException`，静默回落系统档）。
+- 不做：rtmp 每 15s 重连一次（画面反复重开，日志周期性 `read fail -5`）；带 Referer 的 rtmp 打不开；
+  非 H.264/AAC 的 FLV 源在 Media3/SHW 档直接失败。
+
+**未做 / 边界**
+- RTMP 反向推送（publish）、rtmpe 的 DH 密钥交换、E-RTMP Multitrack。
+- DIYP App 自带 Maven Media3 1.8（EXO 硬/软档）仍用上游 FLV 解析器，不含上述 FLV 补丁；SHW/MsMedia 档已含。
+- 真机未验：需重编 so + AAR 后播 rtmp 看 `FfIo` 日志与 >60s 连续性。
+
+**验证**：`gcc -fsyntax-only`（ms_ff_io.c）；`javac`（两个 FLV reader + FfDataSource/FfIo，媒体库预编 classes）。
+
+## 2026-11-25 16:20
+
+### 名称
+音频 PTS 跳变：不刷 Audio sink error
+
+### 状态
+完成
+
+### 改动
+- Media3 `DefaultAudioSink`：>200ms discontinuity 仍自同步，不再 `onAudioSinkError`（避免 DecoderAudioRenderer 打 E）
+
+### 用途
+直播/ysp-tea 常见非致命跳变；降 log 噪音，不影响对齐逻辑。
+
+### 验证
+重编 APK 播直播；不应再刷 `Unexpected audio track timestamp discontinuity`。
+
+## 2026-11-25 16:18
+
+### 名称
+直链 `ysp-tea=2`：探测请求剥 query + 频道
+
+### 状态
+完成
+
+### 改动
+- `ByteHeadSource.Head.open`：先 `a.q` 记模式，再 `a.s` 剥 `ysp-tea` 后才 HTTP；`hold.tea` 传给 HLS/Progressive
+- `channels.txt`：`YSP-tea2-ldn` → `…playlist.m3u8?wsApp=HLS&ysp-tea=2`
+
+### 用途
+CDN 请求只带 `wsApp` 等业务参；茶模式仍按 2 解密分片。
+
+### 验证
+重装后点 `YSP-tea2-ldn`；抓包/日志请求 URL 无 `ysp-tea`。
+
+## 2026-11-25 16:15
+
+### 名称
+YSP 茶解密：符号短名化 + dex 藏 query 字面量
+
+### 状态
+完成（须重编 so/APK）
+
+### 改动
+- `ysp_tea`：类型/API → `m1` / `ms_m1_*`；敏感方法 `d8k/d_u/s_mk/…`；编译 `-fno-rtti -fno-exceptions`
+- `n.a`：query 名字节拼（运行时仍是 `ysp-tea`）；JNI 契约 o/c/f/u 不变
+- **不动**：线协议 `?ysp-tea=1|2`、JS 回传、xxtea JS API、压壳/R8 流程
+
+### 用途
+IDA/dex 少看到 ysp/tea 语义名；播控与 URL 兼容。
+
+### 验证
+NDK 单编 `ysp_tea.cpp`+jni OK；strip 后 .o 无 ysp 算法串；`k()`==`ysp-tea`。
+
+## 2026-11-25 16:05b
+
+### 名称
+yspweb 打成 MSJS 进 assets
+
+### 状态
+完成
+
+### 改动
+- `samples/js/yspweb.msjs`（明文 `yspweb.js` 仍保留）
+- `android/msm3/.../assets/js/yspweb.js` = 密文（头 `MSJS`）；`channels.txt` 路径不变
+
+### 用途
+APK 内 YSP 规则不以明文落盘；改脚本先改 samples 明文再 pack。
+
+### 验证
+```bash
+xxd -l 4 android/msm3/app/src/main/assets/js/yspweb.js   # 4d53 4a53
+cd /home/long/code/MsMedia && bash scripts/android_single_build.sh msm3
+```
+
+## 2026-11-25 16:05
+
+### 名称
+凤凰起播头抄超级直播；广西 TS 二进制 getbin
+
+### 状态
+完成
+
+### 改动
+- `fhx_live.js`：取址用网页 UA + Referer=`m.fengshows.com`；起播只回 `User-Agent=VLC/3.0.20`（对齐 `apply_play_host_headers`）
+- `ms.getbin`：HTTP 正文 → ArrayBuffer
+- `gxtv_live.js`：分片 `getbin` + Uint8Array 解密；`take_bytes` 认 TypedArray
+- msm3 assets 同步
+
+### 用途
+- 凤凰 CDN 掐浏览器 UA → 设备 403；超级直播按 host 固定 VLC/3.0.20。
+- 广西 `Cannot find sync byte`：`ms.get` 把 TS 当 UTF-8，0x47 同步字节毁了。
+
+### 验证
+```bash
+cd /home/long/code/MsMedia && bash scripts/android_single_build.sh msm3
+# 点 JS-凤凰中文 / JS-广西卫视
+```
+
+## 2026-11-25 15:56
+
+### 名称
+YSP `cKey aes fail`：二进制当 UTF-8 字符串
+
+### 状态
+完成
+
+### 改动
+- `ms_qjs_bind`：`hex_decode`/AES/`random_bytes`/b64_decode/cipher → **ArrayBuffer**；`js_to_bytes` 认 AB/TypedArray
+- `yspweb.js` / `sdtv` / `cctv` / `gxtv`：按字节读写 ArrayBuffer
+
+### 用途
+AES 密钥 16B 经 `JS_NewStringLen` 变 UTF-8 约 27B → 密钥长度非法 → `cKey aes fail`。
+
+### 验证
+```bash
+cd /home/long/code/MsMedia && bash scripts/android_single_build.sh msm3
+# 点 JS-YSP-CCTV*
+```
+
+## 2026-11-25 15:52
+
+### 名称
+JS_Eval 缺 NUL：尾部读出 0x0f 假 SyntaxError
+
+### 状态
+完成
+
+### 改动
+- `ms_qjs_wrap`：unwrap 结果强制 `out[len]=0`（QuickJS 硬性要求）
+
+### 用途
+山东等脚本 `script_len` 正确、tail 正常，却报 `unexpected token '\\x0f'`——越界读堆。YSP 等同路径一并修好。
+
+### 验证
+本机复现：无 NUL + 尾填 0x0f → 同设备报错；有 NUL → OK。重编 msm3 再点山东/YSP。
+
+## 2026-11-25 15:55
+
+### 名称
+伪装 URL 的加密 JS（MSJS）：剥头认固定头
+
+### 状态
+完成
+
+### 改动
+- `ContentSniff.isJsPayload`：明文 main / `MSJS` / gzip
+- `PrefixStripDataSource`：见上述正文即整段透传（不依赖 `.js` 扩展名）
+
+### 用途
+`http://…/live.m3u8?id=cctv1` 实为 MSJS 时，密文不会被剥头砍掉魔数，ByteHead 仍走 JS eval。
+
+### 验证
+包一枚 MSJS，URL 用 `.m3u8`，应能解析 main；logcat 无 Source error。
+
+## 2026-11-25 15:50
+
+### 名称
+JS 二次起播 SyntaxError（PrefixStrip 误剥 + TS/BMFF 文本假签名）
+
+### 状态
+完成（待重编验证）
+
+### 改动
+- `PlaySources`：`.js/.msjs` 不走 PrefixStrip
+- `PrefixStripDataSource`：URI/正文含 `function main` 则整段透传
+- `ms_probe.c`：脏字节区拒绝 ASCII 文本里的 TS/BMFF/HLS 假签名（`ORIGIN` 的 G、`skip`/`#EXTM3U`）
+- `ms_qjs.c`：worker 前拷贝 script/url；eval 失败打 tail hex
+
+### 用途
+河南/湖南等同脚本「第一次能播、换台再回来 SyntaxError」——剥头把脚本截半截或尾部脏字节。
+
+### 验证
+```bash
+cd /home/long/code/MsMedia && bash scripts/android_single_build.sh msm3
+# 河南卫视连切两次；YSP 湖南/凤凰同测
+```
+
+## 2026-11-25 15:40
+
+### 名称
+湖南(YSP)/凤凰 JS `eval exception` / `js main() failed`
+
+### 状态
+完成（待设备重编验证）
+
+### 改动
+- `src/qjs/ms_qjs.c`：异常文案打 log；编译期不挂 interrupt；main 超时 90s；Android 独立 1MiB 栈线程跑 eval（避开 Exo 线程栈紧 → `SyntaxError: stack overflow`）
+- `src/qjs/ms_qjs_bind.c`：全局补 `encodeURIComponent`/`decodeURIComponent` → `ms.urlencode/urldecode`
+- `samples/js/fhx_live.js` + msm3 assets：`ms.urlencode` + VLC UA（对齐 entry.lua）
+- `ms_qjs_wrap.c`：`has_main` 边界修正
+
+### 用途
+CHIP 上点「YSP-湖南 / 凤凰」不再因栈溢出或浏览器全局缺失直接 Source error；失败时 logcat `Qjs` 能看到具体 JS 异常。
+
+### 验证
+```bash
+cd /home/long/code/MsMedia && bash scripts/android_single_build.sh msm3
+# 装包后点 JS-YSP-湖南卫视 / JS-凤凰中文；logcat 过滤 Qjs
+```
+
 ## 2026-11-19 15:08
 
 ### 阶段
@@ -3535,3 +3939,688 @@ by: Long <mycjzb@gmail.com>。细节与阈值出处见 `docs/DESIGN_AUDIT.md` �
 - API 34 模拟器（TCG、`-accel off`、`-no-audio`）：VSYNC 周期采到 16666666 ns，`getLatency` 扣除后约 90 ms，钟源在平滑 head（2）与停滞兜底（4）间切换，未进入 getTimestamp（模拟器无音频输出）。解码极慢：160x90@25fps 样片 SurfaceFlinger 实测约 1.5 fps（阶段 7 包同条件约 2.1 fps，两者都远低于实时），视频始终落后音频数秒到数十秒，所以只走到强制释放（每 >100 ms 出一帧）与丢到关键帧；超前握住、定时释放（`scheduled`）在模拟器上为 0，**未被触发**。选轨/字幕自测 1 轮 21 PASS / 3 FAIL（默认字幕选中态、内嵌字幕时间窗、取消字幕后 null 回调，与阶段 7 的时序类失败同类），无崩溃。
 - API 18 模拟器冒烟：装包、prepared 838 ms，无 VerifyError / UnsatisfiedLinkError / 崩溃；首帧仍因该 AVD 的 OMX.google.h264 解码器环境问题超时（与之前一致），API 18 回退路径的实际出帧未验证。
 - 未验证：真机口型同步、真机上 getTimestamp/getLatency 行为、定时释放 + VSYNC 吸附的实际效果、高刷屏、直通音频下的时钟。
+
+## 2026-11-25：msm3 对齐设计「支持范围」（接口不变）
+
+by: Long <mycjzb@gmail.com>
+
+**谁用 / 何时**：Media3+FFmpeg 交付线（`android/msm3`）；能力对齐根 README 支持范围表，对外 MsHttpClient 等接口不改签名。
+
+| 项 | 状态 | 改动 |
+|---|---|---|
+| 封装 | 完成 | `PlaySources`：MKV/AVI/PS + 裸 AAC/AC3/MP3/FLAC/WAV；`file:`→FileDataSource |
+| 播放 HTTPS 忽略证书 | 完成 | `MsHttpClient.Builder.tlsInsecure`；`JniHttpDataSource` 默认 true；业务默认仍严格 |
+| DTS 软解 | 完成 | ADEC 加 `dca`；`FfAdec.CODEC_DTS`；FfmpegAudioRenderer mime |
+| 字幕 | 完成 | 见下节 2026-11-25 10:44 |
+| 透传 | 部分 | `EXTENSION_RENDERER_MODE_ON`：MediaCodec/透传优先，软解回落 |
+| 剥伪装头 | 完成 | 编入 `ms_probe` + `MsProbe` JNI + `PrefixStripDataSource` |
+
+验证：`android_single_build.sh` + `build_msm3.sh` BUILD SUCCESSFUL；v7a so ≈2.07MB（含 DTS）。
+
+**不做后果**：设计表里的 MKV/DTS/自签 HTTPS/伪装头切片在 msm3 上会播不过或证书失败。
+
+## 2026-11-25 10:44 Asia/Shanghai — msm3 字幕（内嵌 + 外挂 + 位图 Overlay）
+
+by: Long <mycjzb@gmail.com>
+
+**谁用 / 何时**：msm3 演示播本地/HTTP 片；无 media3-ui，自绘叠层。
+
+**改动**
+- `PlaySources`：`DefaultSubtitleParserFactory` 挂进 Mp4/fMP4/Matroska/Avi Extractor；本地同目录 sidecar `.srt/.vtt/.ass/.ssa`；`MergingMediaSource`+`SingleSampleMediaSource` 合并外挂；`externalSub`/`guessSubMime`
+- `SubtitleOverlay`：文案轨（白字+阴影）+ 位图轨（PGS/DVB `Cue.bitmap`）
+- `PlayActivity`：叠层；`--es subtitle`；`TrackSelector` 优先 `zh`；`onCues`→`setCues`
+
+**用途（反推）**：内嵌轨不接 Parser 则 MKV/MP4 字幕出不来；无 sidecar/Intent 则外挂文件播不出；无 Overlay 则只有轨没有画面字。
+
+**验证**：`bash scripts/build_msm3.sh` → `assembleDebug` SUCCESS；apk `android/msm3/app/build/outputs/apk/debug/app-debug.apk`（约 6.6MB）。真机字幕画面未验。
+
+**限制**：完整 ASS 字体/动画/绘图未做（Media3 文本解析即可）；TS 内嵌 DVB 依赖 Extractor 是否吐出字幕轨；EIA-608 CC 未做。
+
+## 2026-11-25 Asia/Shanghai — SDK 引擎切换（sys:/shw: + 全局默认）+ 客户文档
+
+by: Long <mycjzb@gmail.com>
+
+**谁用 / 何时**：客户集成 `MediaPlayer` SDK；目录/业务按源或整机选系统 vs 自研。
+
+**改动**
+- `PlayEngine.java`：`SYSTEM`/`SHW`、全局 `setDefault`、源前缀 `sys:`/`shw:`（对齐超级直播剥前缀习惯）
+- `SysPlayerBackend.java`：系统 MediaPlayer 薄封装
+- `MediaPlayer`：`setDefaultEngine`/`getEngine`；setDataSource 解析前缀；SYSTEM 走 Sys，SHW 走 libmsplayer
+- `docs/SDK接入指南.md`；README 入口；`MEDIAPLAYER_API.md` 标内部归档
+
+**用途（反推）**：无全局默认接口则无法整机切系统档；无源前缀则无法单条强制（如弱盒 AVS 写 `sys:`）。
+
+**验证**：前缀解析自检；本机无 javac 未做全量 javac；真机对照未验。
+
+**限制**：系统档 `getTrackInfo` 暂空；SHW=libmsplayer（msm3 Media3 线未并入 SDK 引擎位）。
+
+## 2026-11-25 Asia/Shanghai — SDK 直播判断 + 画面比例（抄超级直播）
+
+by: Long <mycjzb@gmail.com>
+
+**谁用 / 何时**：客户 SDK 区分直播/点播 UI（进度条、seek）；设置画面比例。
+
+**改动**
+- `LiveDetect.isLiveProto`（抄 `PlayUrls`）；`MediaPlayer.isLive`/`isVod`/`setLiveHint`（时长滑动 + `Q_SEEKABLE`/`NOT_SEEKABLE`）
+- `AspectMode` + `MsAspectLayout`（量算抄 `MeasureHelper`）；`setAspectMode`/`getAspectMode`
+- `docs/SDK接入指南.md` §5–§6；README 摘要
+
+**用途（反推）**：无 isLive 则直播误出进度条/seek；无比例布局则客户各写一套裁切。
+
+**验证**：javac 新类 + MediaPlayer；前缀/比例 normalize 自检。
+
+**兼容**：不改 native 签名；reset 清直播缓存；liveHint 仅 reset 清空。
+
+## 2026-11-25 Asia/Shanghai — isLive：m3u8/mpd 清单优先
+
+by: Long <mycjzb@gmail.com>
+
+**改动**：`LiveDetect.isHlsOrDash`；`isLive`：清单下 `seekable==0` 或 `dur≤0` → 直播（无 ENDLIST / live MPD）；清单有总时长 → 点播；flv 仍时长滑动兜底。
+
+**用途**：直播 m3u8 无结尾不能当点播 seek；点播 m3u8 有 ENDLIST 要尽快可 seek。
+
+**验证**：javac + 清单优先阈值自检。
+
+## 2026-11-25 Asia/Shanghai — msm3 多音轨 + 频谱（抄超级直播）
+
+by: Long <mycjzb@gmail.com>
+
+**谁用 / 何时**：msm3 演示多音轨片源与电台式能量条；接口对齐超级直播 Media3，不另造算法。
+
+**改动**
+- `ExoAudioBarsSink.java`：原样抄 `bs-mycjzb-media3`（包名 msm3）
+- `TrackHelper.java`：抄 `ExoUdpxyPlayer.rebuildFlat/selectTrack`，仅 AUDIO
+- `PlayActivity`：`buildAudioSink`+`TeeAudioProcessor`；`setPreferredAudioLanguage("zh")`；`onTracksChanged`；切音轨按钮/红键；overlay 音轨摘要 + 频谱 5 段
+
+**用途（反推）**：多音轨片不切则永远默认轨；无 Tee 则宿主读不到 PCM 能量（透传无 PCM 时 bars=0 属正常，勿当故障）。
+
+**兼容**：不改 `PlaySources`/字幕/`EXTENSION_ON`/MsHttp；Tee 只旁路拷贝 PCM，不改解码；选轨失败静默。
+
+**验证**：`bash scripts/build_msm3.sh` assembleDebug。
+
+## 2026-11-25 Asia/Shanghai — msm3 按字节头选源（同连接，不信扩名）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**
+- `ContentSniff`：只认正文 `#EXTM3U` / `<MPD`/`<mpd`，否则 Progressive；不看扩展名、不看 Content-Type
+- `ByteHeadSource`：prepare 时经既有 `PrefixStripDataSource` **只 open 一次** → 读头 → 选 Hls/Dash/Progressive → 头缓冲续传；分片/刷新仍走 base 新连接
+- `PlaySources`：去掉 URL `isHls`/`isMpd`/`progressiveMime` 选源；外挂字幕旁路文件名配对保留
+- 文档：`docs/SDK接入指南.md` §5、`android/msm3/README.md`
+
+**用途（反推）**：假后缀（TS 写成 `.m3u8`）按扩名会进错 Hls 解不开；必须同连接看字节头再交下层，且探测不得关连重开。
+
+**验证**：ContentSniff 单元断言 OK；`./gradlew :app:compileDebugJavaWithJavac` BUILD SUCCESSFUL。
+
+**兼容**：剥图伪装、字幕 Merging、Ff/Jni/File 工厂、Extractor 列表未改；自研 `MediaPlayer`/FFmpeg 路径本就内容探测，未动。
+
+## 2026-11-25 Asia/Shanghai — ① shw: 接到 Media3（可装 Factory）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（编译通过；真机未验）
+
+**改动**
+- `ShwBackend` + `MediaPlayer.setShwFactory`：有 Factory 则 SHW→Media3，无则回落 native（single APK 无 Media3 仍可 javac）
+- `M3PlayerBackend`：ExoPlayer + `PlaySources`/`ByteHeadSource`；`install()`；`isLive()`→Timeline
+- `MediaPlayer`：prepareAsync/播控/Surface/音量/seek/时长与 sys 并列走 shw；`tryInstallM3Factory` 反射装载
+- msm3：编入 MediaPlayer；`PlayActivity` 启动 `install()`
+- 文档：`SDK接入指南` §2；`PlayEngine`/`LiveDetect` 注释
+
+**用途**：客户 SDK 的 `shw:` 要变成 Media3 内核，而不是永远绑死旧 FFmpeg 全路径；无 Media3 的旧 single 包不能编挂。
+
+**验证**：`./gradlew :app:compileDebugJavaWithJavac` BUILD SUCCESSFUL。
+
+**未做（交 ②③）**：默认最高清；删 m3demo/single；MsPlayer.git 打进 Media3 AAR。
+
+## 2026-11-25 Asia/Shanghai — ② 多码率默认最高清
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**：`M3PlayerBackend` / `PlayActivity` 的 `DefaultTrackSelector` 加 `setForceHighestSupportedBitrate(true)`；SDK 文档 §5 一句说明。
+
+**用途**：HLS/DASH 多清晰度若不默认最高，盒子会停在最低档。
+
+**验证**：compileDebugJavaWithJavac SUCCESSFUL。
+
+**③**：删 `m3demo`/`single` **等真机验过 + 你点名删**再动（删目录须确认）。
+
+## 2026-11-25 Asia/Shanghai — SHW=Media3 源码；删旧 native 播控
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（编译通过）
+
+**改动**
+- Media3 胶水迁入 SDK 包 `com.mycjzb.media.player`：`M3PlayerBackend`/`PlaySources`/`ByteHeadSource`/DataSource/Ff* 等（Java 源码）
+- `MediaPlayer`：`shw:` **只**建 `M3PlayerBackend`；去掉 `nativeSetup`/`nativeSetSurface`/整段旧播控 JNI 调用与 Factory 回落
+- so 用途收窄：仅 JniHttp/FfIo/FfAdec/MsProbe；不再经 `MediaPlayer.nh` 播控
+- 文档：`SDK接入指南` §2；`PlayEngine` 注释
+
+**用途**：客户 SDK 内核就是 Media3 Java；旧 FFmpeg 全路径播控与「扩名 Factory」都是用不到的，留着只会误导。
+
+**验证**：`compileDebugJavaWithJavac` BUILD SUCCESSFUL。
+
+## 2026-11-25 Asia/Shanghai — Demo 只调 SDK 模块（:msplayer）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**
+- 新建 `android/msplayer` library：SDK Java（`hw/java`）+ Media3 依赖 + FfAdec 扩展 + jniLibs
+- `msm3/app`：去掉 `java.srcDirs += hw/java` 与直接 Media3 依赖；`implementation project(':msplayer')`
+- `PlayActivity`：改为 `com.mycjzb.media.player.MediaPlayer` 播控（不再 `new ExoPlayer`）
+- 删 demo 内 TrackHelper/频谱/SubtitleOverlay（未再经 SDK）
+
+**用途**：客户怎么接 SDK，demo 就怎么接；禁止演示工程把 SDK 源码编进去冒充接入。
+
+**验证**：`./gradlew :msplayer:compileDebugJavaWithJavac :app:compileDebugJavaWithJavac` SUCCESSFUL。
+
+## 2026-11-25 Asia/Shanghai — Media3 源码并进 :msplayer（非多模块 SDK 套 SDK）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**
+- `msplayer/build.gradle`：`third_party/media3-src/libraries/{common,container,database,datasource,decoder,extractor,exoplayer,exoplayer_hls,exoplayer_dash}/src/main/java` 直接进本模块 `java.srcDirs`；去掉 `api project(':media3-lib-*')`
+- `msm3/settings.gradle`：不再 `include` media3 子工程；工程树只剩 `:app` + `:msplayer`
+- 排除 `DownloadNotificationHelper`（唯一依赖 `androidx.media3.exoplayer.R`，SDK 不用下载通知；避免单模块 R 包名冲突，也不并入 exoplayer 多语言 res）
+- Manifest 收口 `ACCESS_NETWORK_STATE`；consumer-rules 收口反射 keep / dontwarn
+- 依赖：guava/annotation/core 等原 media3 传递依赖挂在 `:msplayer`（版本对齐 `constants.gradle` + `media3-m2`）
+
+**用途**：客户只接一个 SDK；改低版本兼容、删用不到的 Media3 类可直接改源码，不是再依赖一套 Media3 library 模块。
+
+**验证**：`./gradlew projects` 仅 `:app` / `:msplayer`；`:msplayer:assembleRelease` + `:app:assembleRelease` BUILD SUCCESSFUL；APK ~5.2M、AAR ~5.3M。
+
+**未动**：`m3demo` 仍为独立 media3 子工程接线（非本轮交付路径）。
+
+## 2026-11-25 Asia/Shanghai — Media3 源码瘦身（不减播控能力）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动（third_party/media3-src）**
+- offline：只留 `FilterableManifest` / `FilteringManifestParser`（HLS/DASH 清单过滤仍要）；删 Download*/Downloader*/SegmentDownloader 等
+- 删 `exoplayer/scheduler` 整包；删 hls/dash `*Downloader`
+- image：只留 `ImageOutput`；`DefaultRenderersFactory.buildImageRenderers` 空实现
+- extractor：删 amr/ogg/avif/bmp/heif/webp；`DefaultExtractorsFactory` 同步；保留 jpeg/png（DASH 图轨）
+
+**用途**：AAR 体积下来，播控路径（HLS/DASH/progressive + PlaySources 容器）不变。
+
+**验证**：`:msplayer:assembleRelease` + `:app:assembleRelease` BUILD SUCCESSFUL；AAR 5.3→5.2MB，classes.jar 3.3→3.2MB；exoplayer 未压缩 class 6.0→5.6MB，extractor 2.7→2.6MB。
+
+## 2026-11-25 Asia/Shanghai — libmsplayer.so UPX 压壳进 SDK
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**
+- 用 `scripts/pack_android_so.py`（超级直播同款）压双 ABI so：v7a 2070724→1661664；v8a 2548792→2157948
+- 写入 `android/msm3/app/src/main/jniLibs`；build 产物留 `.unpacked`
+- `scripts/build_msm3.sh`：优先取 `.unpacked`，拷进 jniLibs 后强制再 UPX
+
+**验证**：assembleRelease SUCCESSFUL；jniLibs v7a 1.6M / v8a 2.1M。
+
+## 2026-11-25 Asia/Shanghai — msm3 release 开 R8（不裁 HLS/DASH）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待用户编包量体积）
+
+**改动**
+- `android/msm3/app/build.gradle`：release `minifyEnabled true` + `shrinkResources true` + `proguard-android-optimize.txt`
+- 新增 `android/msm3/app/proguard-rules.pro`
+- `android/msplayer/consumer-rules.pro`：去掉整包 `-keep com.mycjzb.media.player.**`；改 JNI/公开 API 精确 keep；保留 HLS/DASH Factory 与 `FfmpegAudioRenderer` 反射 keep；补 `AudioCapabilitiesReceiverV23`
+- `android/msplayer/build.gradle`：Guava 排除空 `listenablefuture`；`kotlin-stdlib` / `kotlin-annotations-jvm` / `j2objc-annotations` 改 `compileOnly`（不整包进 dex）
+- `android/hw/consumer-rules.pro`：与 SDK 对齐（删已不存在的 MsSystemTls）
+- **未动**：`exoplayer_hls` / `exoplayer_dash` 源码与模块列表
+
+**用途**：在保留全部播控能力（含 HLS/DASH/mp2 软解）前提下压 `classes.dex`；客户 App 开 R8 时吃同一套 consumer-rules。
+
+**验证**（用户本机）：
+```bash
+cd /home/long/code/MsMedia/android/msm3 && ./gradlew :app:assembleRelease
+# 对照改前 ~7.6M：
+ls -la app/build/intermediates/dex/release/minifyReleaseWithR8/*.dex 2>/dev/null
+unzip -l app/build/outputs/apk/release/app-release.apk | grep classes
+```
+
+## 2026-11-25 Asia/Shanghai — SDK 模块自身 R8（交付已裁 AAR）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待用户编包）
+
+**改动**
+- `android/msplayer/build.gradle`：release `minifyEnabled true`，`proguardFiles` 用 `consumer-rules.pro`（与客户二次 R8 keep 同源）
+- 明确：裁剪在 SDK，不靠客户 App、不裁 HLS/DASH
+- `msm3/README.md` 注明 release AAR 已裁
+
+**用途**：交给客户的就是瘦过的 `:msplayer`；demo 开 minify 只是验包，不是裁剪真源。
+
+**验证**：
+```bash
+cd /home/long/code/MsMedia/android/msm3 && ./gradlew :msplayer:assembleRelease :app:assembleRelease
+ls -la ../msplayer/build/outputs/aar/msplayer-release.aar
+# AAR 内 classes.jar 对照改前
+unzip -l ../msplayer/build/outputs/aar/msplayer-release.aar | grep classes
+```
+
+## 2026-11-25 Asia/Shanghai — YSP TEA：C 拷贝 + JNI + Media3
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待用户编 so / 装机）
+
+**改动**
+- `src/ysp/ysp_tea.h` + `ysp_tea.cpp`：自超级直播拷贝
+- `src/ysp/ms_ysp_tea_jni.c` + Media3 DataSource 包装；HLS 仅 `DATA_TYPE_MEDIA` 解密
+- 后续已改为短名 `n.a`（见下条）
+
+**用途**：客户/demo 给已带 `?ysp-tea=1|2` 的 m3u8/TS，Media3 分片走 so 内 TEA 出明文；本轮无 Lua/JS、无 httpd /proxy。
+
+**验证**：见下条 P0。
+
+## 2026-11-25 Asia/Shanghai — JS 规则：内容嗅探 + QuickJS
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（宿主自检 PASS；待用户编 so / 装机）
+
+**改动**
+- `scripts/fetch_quickjs.sh` + `third_party/quickjs/`（客户可跑拉取）
+- `src/qjs/ms_qjs*.c`：eval `main(item)`；`ku9`/`ms` 子集；HTTP→`ms_nc_http`
+- JNI `n.b.e`；`ContentSniff.JS`；`ByteHeadSource` 读全脚本→eval→再探测（depth≤2）
+- `android_single_build.sh` ADEC 编入 QuickJS；map/rules keep `n.b`
+- 文档 `SDK接入指南` §12；自检 `tests/content_sniff_js_check.py`、`tests/qjs_eval_host.sh`
+
+**用途**：频道给 `http://…/*.js`（正文含 `function main`）即可解析出可播地址再播，不必先写 `js://`；对齐 js-rules 写法，避免误把 TS/MP4 当脚本。
+
+**验证**：
+```bash
+bash scripts/fetch_quickjs.sh
+python3 tests/content_sniff_js_check.py   # PASS
+bash tests/qjs_eval_host.sh               # PASS
+cd /home/long/code/MsMedia && bash scripts/build_msm3.sh -va v7a
+```
+
+## 2026-11-25 Asia/Shanghai — 客户文档：钉 App 签名
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**：`docs/SDK接入指南.md` 新增 §11（何时验、`EXPECT_SIGN_OBF`、keystore→XOR 脚本、压壳编法、排障、obf/包名注意）；原 License 改为 §12。
+
+**用途**：源码交付后客户能自己把 so 指纹换成 release 证书，避免上柜压壳包 TEA/guard 误拒。
+
+**验证**：打开文档按 §11.3 命令能打出 32 字节数组即可（不必本机真编）。
+
+## 2026-11-25 Asia/Shanghai — SDK JNI 明文串 obf（独密钥）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待用户编 so）
+
+**改动**
+- `src/obf/obfdec.{c,h}` + `obfstr.{c,h}`：rolling XOR 双 bank（算法同超级直播，密钥 MsMedia 独有）
+- `scripts/gen_obf_strings.py` → `src/obf/obf_strings.h`（45 条）
+- `apk_sign.c` / `guard.c`（`/proc`、TracerPid、fail 原因）/ `ms_netcore.c`（MsHttpClient DNS）改走 `MS_JNI_*` / `MS_OBF_DEC`
+- `android_single_build.sh` slimff 编入 `obfdec`+`obfstr`
+
+**用途**：定制内核 so 的 `.rodata` 不落 ActivityThread / MsHttpClient 等明文；与直播包密钥隔离，防串用解密。
+
+**验证**：
+```bash
+cd /home/long/code/MsMedia && bash scripts/build_msm3.sh -va v7a
+# so 内应无明文：
+strings build/android-v7a/single-slimff-adec-s6-noxml/os/libmsplayer.so | grep -E 'ActivityThread|MsHttpClient|TracerPid' || echo ok-no-plain
+# 改串后重生成：
+python3 scripts/gen_obf_strings.py
+```
+
+## 2026-11-25 Asia/Shanghai — P0：soft guard + 签名钉 + n.a 短名 JNI
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待用户编 so / 装机）
+
+**改动**
+- `src/guard/guard.{h,c}`、`apk_sign.{h,c}`：soft TracerPid/maps/.text；APK 证书 SHA-256 与嵌入指纹比对；失败 `ms_guard_force_fail`，不 `_exit`
+- `ms_msm3_jni_vm.c`：`JNI_OnLoad` → `ms_apk_sign_ensure` + `ms_guard_ensure`
+- `ysp_tea_create` / `n.a.o`：查 `ms_guard_ok()`，失败返回 0/null
+- Java：`com.mycjzb.media.player.n.a`（`o/c/f/u`=`open/close/feed/flush`；`m1/m2/q/s/r`）；删 `YspTea.java`
+- `ByteHeadSource` / `YspTeaDataSource` / `YspHlsDataSourceFactory` 改调 `n.a`
+- `libmssingle.map` 导出 `Java_com_mycjzb_media_player_n_a_*`；consumer-rules keep `n.a`
+- `android_single_build.sh`：编入 guard+apk_sign；`PACK_SO=1`（跟 `LINK_BFD`）时 `-DMS_GUARD_ENABLED=1`
+
+**用途**：正式压壳包防调试/换签后 tea 入口失效；短类名降低明文 JNI 暴露；debug 未压壳默认不开 guard，避免本机 debug.keystore 未对齐时误拒。
+
+**验证**：
+```bash
+cd /home/long/code/MsMedia && bash scripts/build_msm3.sh -va v7a
+# 压壳+guard：bash scripts/build.sh --pack 1 -va v7a（或工程约定等价）
+nm -D build/android-v7a/single-slimff-adec-s6-noxml/os/libmsplayer.so | grep 'media_player_n_a'
+# 频道 URL：https://…/index.m3u8?ysp-tea=1
+```
+
+## 2026-11-25 Asia/Shanghai — MsProbe JNI 对齐 + ms-only + 加密 + JS 样例
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（宿主自检；待用户重编 so）
+
+**改动**
+- JNI：`MsProbe` / `FfAdec` / `FfIo` 符号改为 `Java_com_mycjzb_media_player_*`（与 Java 包一致）；`libmssingle.map` 只导出 `player` 前缀（去掉 msm3）
+- QuickJS：只挂全局 `ms`（不重复 `ku9`/`cjs`）；`ms_qjs_crypto.c` AES-CBC/ECB、XXTEA、RSA 加解密/签验、`hmac_sha256`；编入 `android_single_build.sh` ADEC
+- 样例：`samples/js/` 每站一文件（web_page / yy / gdy / mgtv / huya / hebtv / ahtv / cctv）
+- 文档：`SDK接入指南` §12 改为 ms-only API 表；宿主自检链上 crypto
+
+**用途**：修 `UnsatisfiedLinkError MsProbe.nativeMediaOffset`；脚本侧统一 `ms.*`；央视等需 HMAC/AES/RSA 的解析可写 JS；一站一文件便于热更。
+
+**验证**：
+```bash
+cd /home/long/code/MsMedia
+python3 tests/content_sniff_js_check.py
+bash tests/qjs_eval_host.sh
+bash scripts/build_msm3.sh -va v7a
+nm -D build/android-v7a/single-slimff-adec-s6-noxml/os/libmsplayer.so | grep -E 'MsProbe|FfAdec|n_b_e'
+# 应见 Java_com_mycjzb_media_player_MsProbe_nativeMediaOffset，无 msm3_
+```
+
+## 2026-11-25 Asia/Shanghai — JS 返回 A/B + P0 API + yspweb
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（宿主 A/B 自检；待用户重编 so / 装机）
+
+**改动**
+- `ms_qjs_eval_ex` / `ms_qjs_result`：A=`url`；B=`m3u8`/`body`（≤8MiB）+ `contentType`
+- JNI `n.b.e` → `Object[]{kind,url,headers,body,contentType}`；`ByteHeadSource`：B 走内存 HLS/DASH/Progressive（分片仍 net）
+- `ms.*`：`cipher`（OpenSSL AES-128/256 ecb/cbc/ctr）、`getCache`/`setCache`、`urlencode`/`urldecode`、`random_bytes`、驼峰别名
+- 样例：`samples/js/yspweb.js`（A）、`body_demo.js`（B）；文档 §12.0
+
+**用途**：脚本可只回 CDN 地址，也可自己下完清单/短文件交给内核；为以后「JS 下密流再交内核」留灵活口；yspweb 可热更。
+
+**验证**：
+```bash
+cd /home/long/code/MsMedia
+bash tests/qjs_eval_host.sh    # ok A + ok B
+bash scripts/build_msm3.sh -va v7a
+```
+
+## 2026-11-25 Asia/Shanghai — stream + stream_call（分片二次处理）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（宿主自检；待用户重编 so）
+
+**改动**
+- `main()` 可返回 `stream` / `streamArgs`（JSON）；JNI `e` 多两槽
+- 固定 `stream_call(url, args)`：`ms_qjs_stream_call` + JNI `n.b.s` → byte[]（≤32MiB）
+- `ByteHeadSource.JsStreamHookFactory`：有 stream 时分片 open 调 `b.s`，失败回落 HTTP
+- 样例 `samples/js/stream_hook_demo.js`；文档 §12.0.2
+
+**用途**：广西等「清单可播、TS 要再解」——JS 声明 stream，内核把原始 TS URL 丢回脚本取明文字节，算法仍用 `ms.cipher`（OpenSSL）。
+
+**验证**：
+```bash
+cd /home/long/code/MsMedia && bash tests/qjs_eval_host.sh   # 含 ok stream_call
+bash scripts/build_msm3.sh -va v7a
+```
+
+## 2026-11-25 Asia/Shanghai — JS 脚本明文 / gzip / MSJS 加密
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（宿主明文自检；MSJS 须 so 内 OpenSSL+zlib；待用户重编）
+
+**改动**
+- `ms_qjs_wrap`：unwrap 明文 / 裸 gzip / `MSJS`（AES-256-GCM±gzip，密钥独有）
+- `eval_ex` / `stream_call` 先 unwrap；`ContentSniff` 认 `MSJS`/`1f8b`
+- `scripts/pack_msjs.py`；文档 §12.0.3
+- **固定头** `MSJS`+`ver=1`；脚本上限 **512KiB**
+
+**用途**：下发脚本可加密压缩防窥改，本机调试仍可明文 `.js`；形态对齐 Lua MSPL 能力。
+
+**验证**：
+```bash
+python3 tests/content_sniff_js_check.py
+bash tests/qjs_eval_host.sh
+python3 scripts/pack_msjs.py -i samples/js/body_demo.js -o /tmp/t.msjs
+# 头四字节必为 MSJS
+bash scripts/build_msm3.sh -va v7a
+```
+
+## 2026-11-25 Asia/Shanghai — shw 直播掉窗自愈（err 1/1002）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待真机验浙江文 4K）
+
+**改动**
+- `M3PlayerBackend`：`ERROR_CODE_BEHIND_LIVE_WINDOW` → `seekToDefaultPosition`+`prepare`+`play`，最多 3 次；READY 清零
+- 缓冲水位改为 `MediaPlayer` 默认 15s/30s/1.5s/3s + 16MiB（原 0.5s/5s 易掉窗）
+
+**用途**：HLS 直播短卡后不再直接停死卡画面；4K 直播更稳。
+
+**验证**：重装 msm3 → 播 `channel4k2160p.m3u8` 长时间，不应再出现定格 + `err 1/1002`。
+
+## 2026-11-25 Asia/Shanghai — msm3 内置 JS + 短址列表
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待重打 APK）
+
+**改动**
+- `assets/js/`：拷入 `samples/js/*.js`；`channels.txt` 增加 `js?id=cctv1` 等
+- `PlaySources`：`js?` / `js://` → `asset:///js/…`；`AssetDataSource`；`M3PlayerBackend` 传 Context
+- `ByteHeadSource`：JS 保留原始 query；`yspweb.js` 短名 IDS
+
+**用途**：demo 无外网挂脚本也能验 JS 起播（央视频短名、河北、body/stream）。
+
+**验证**：`bash scripts/build_msm3.sh -va v7a` → 换台 `JS-cctv1`。
+
+## 2026-11-25 Asia/Shanghai — API18 dlopen 缺 rand@LIBC
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待重编 so）
+
+**改动**：`ms_api18_libc.c` 内置 `rand`/`srand`/`arc4random_buf`（同 atof/signal）；`ms_qjs_bind` 不再调 libc `rand`。
+
+**用途**：老盒（API18）装含 QuickJS 的 so 不再 `cannot locate symbol rand`。
+
+**验证**：重编安装后 logcat 无 dlopen rand 失败；`JS-cctv1` 可进解析。
+
+## 2026-11-25 Asia/Shanghai — 广西 gxtv JS 演示
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待重打 APK）
+
+**改动**：`samples/js/gxtv_live.js`（对齐 entry.lua gxtv）；demo `channels.txt` 首项改为 `asset:///js/gxtv_live.js?id=gxws` 等。
+
+**用途**：用真实广西台验 `stream` + `stream_call` 解 TS，替代浙数文透传 demo。
+
+**验证**：重装 → 换 `JS-广西卫视` 应出画。
+
+## 2026-11-25 Asia/Shanghai — QuickJS 引擎参数兼容超级直播
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（须重编 so）
+
+**改动**：`src/qjs/ms_qjs_bind.c`
+- 挂全局 `ku9`/`cjs`（get/post/request/getQuery/cache + 常用摘要）
+- `request`/`http_request` 兼容两种参数序：`url,method,…` 与 `method,url,…`
+- 响应对象补 `status`；`hex2bin`/`bin2hex`/`httpGet` 别名
+
+**用途**：超级直播目录里的 `ku9.*` / `ms.http_request("GET",url)` 脚本可在 MsMedia 宿主直接跑；不改业务 JS 文件。
+
+**验证**：重编 so 后跑 `ku9.get`/`ms.http_request("GET",…)` 样例；原 `ms.get` 回归。
+
+## 2026-11-25 Asia/Shanghai — SDK 接入指南精简
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**：`docs/SDK接入指南.md` 重写精简；删除过时「SHW 不支持自定义 HTTP 头」；§4 写明 `setDataSource(url, headers)` 可用。
+
+**用途**：客户接入文档与代码一致，少废话。
+
+## 2026-11-25 Asia/Shanghai — 交付说明文档
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成
+
+**改动**：新建 `docs/交付说明.md`（SHW/Media3 + 多音轨字幕频谱 + 音频软解扩容 + JS/QuickJS；边界含不做 WMA；无付款条款）。
+
+**用途**：客户/商务对交付范围与验收口径；细节 API 仍以 SDK 接入指南为准。
+
+**验证**：打开该文档对照 §2/§3/§5。
+
+## 2026-11-25 Asia/Shanghai — 常用音频软解扩容（Opus/FLAC/PCM/Vorbis/ALAC）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（Java/C 已改；去掉 WMA；须用户重编 slimff ADEC so）
+
+**谁用 / 何时**：Media3 `EXTENSION_ON` 时系统无 OMX 的音频（WebM Opus、FLAC、Vorbis、ALAC、PCM/WAV）走 FfAdec 软解出声。
+
+**改动**
+- `msmedia.h`：加法 `MS_CODEC_VORBIS/ALAC`（旧值不变；不做 WMA）
+- `ms_hw_ffadec`：supported + `open_ex(extradata)`
+- `ms_ffadec_jni` / `FfAdec`：`nativeOpenEx` + 新 codec 常量
+- `FfmpegAudioRenderer`/`FfmpegAudioDecoder`：mime 映射 + csd→extradata
+- `android_slimff_ffmpeg.sh`：`ADEC_LIST` 加 opus/flac/vorbis/alac
+- `SDK接入指南` 音频行同步
+
+**用途（反推）**：盒子常缺 Opus/FLAC 硬解，不扩软解则无声或起播失败；视频仍硬解 only。
+
+**边界**：不做 WMA——Media3 `PlaySources` 无 ASF，仅软解 AU 也播不了 `.wma`。须重编带新 ADEC_LIST 的 so。
+
+**验证**：重编 so 后真机 WebM Opus / flac / m4a alac；Java：`msm3` `./gradlew :msplayer:compileDebugJavaWithJavac`。
+
+## 2026-11-25 Asia/Shanghai — 湖南/凤凰/山东 JS 演示
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待重打 APK）
+
+**改动**：`hntv_live.js` / `fhx_live.js` / `sdtv_live.js`（+ `mgtv` 短名）；`channels.txt` 增加对应 `asset:///js/…?id=`。
+
+**用途**：demo 覆盖湖南台、凤凰秀、山东台解析起播。
+
+**验证**：重装 → 换 `JS-湖南卫视` / `JS-凤凰中文` / `JS-山东卫视`。
+
+## 2026-11-25 Asia/Shanghai — CHIP extractors 认不出流
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待重打 APK）
+
+**改动**
+- `ByteHeadSource`：`asset`/`.js` 强制读完再当脚本；HTML/JSON 明文拒播；URL 像 m3u8 优先 HLS
+- `JsStreamHook` / `gxtv`：清单不走 `stream_call`
+
+**用途**：避免脚本/错页被 Progressive 解封装 → `None of the available extractors`。
+
+**验证**：重装后播 `JS-广西卫视` / `JS-YSP-CCTV1`；不应再因 HTML 误进 Progressive。
+
+## 2026-11-25 Asia/Shanghai — 河南更名 + YSP 3003
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（待重打 APK）
+
+**改动**
+- `hntv` 演示台改名河南（API 实为 hndt）；列表去掉误标「湖南」
+- JS 回传带 `ysp-tea` / `.m3u8` 时直建 `HlsMediaSource`（密文清单勿 Progressive）
+
+**用途**：台名正确；YSP 不再 `err 1/3003` 因密文 m3u8 误解封装。
+
+**验证**：`JS-河南卫视` 水印河南；`JS-YSP-CCTV1` 起播。
+
+## 2026-11-25 Asia/Shanghai — SHW Media3：多音轨/字幕/频谱对接（抄超级直播）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（javac 通过；真机待验）
+
+**谁用 / 何时**：客户 SDK 切音轨、外挂/内嵌文字字幕、电台式 PCM 能量条；纯音频广播片源 Progressive 起播。
+
+**改动**
+- `ExoAudioBarsSink`：原样抄超级直播 Tee PCM → 5 段 0–255
+- `ShwBackend`：加法 `getTrackInfo`/`selectTrack`/`deselectTrack`/`getSelectedTrack`/`setExternalTimedText`/`readAudioBars`；`Host.onTimedText`
+- `M3PlayerBackend`：`buildAudioSink`+Tee；`onTracksChanged` flat；Override 切轨；`onCues`→TimedText；外挂进 `PlaySources.create(..., extraSubs)`
+- `MediaPlayer`：SHW 委托上述接口；`getAudioBars`；`addTimedTextSource` SHW 走路径/URI
+- msm3 `PlayActivity`：红键切音轨；HUD bars + sub 行
+- `SDK接入指南` §7 同步
+
+**用途（反推）**：SHW 改 Media3 后选轨/字幕 API 曾空实现，客户无法切多音轨/挂字幕/画频谱；透传无 PCM 时 bars=0 属正常。
+
+**不动**：ByteHead/JS/YSP/追窗/`EXTENSION_ON`/系统档；位图 TimedText 本轮不做。
+
+**验证**：`./gradlew :msplayer:compileDebugJavaWithJavac :app:compileDebugJavaWithJavac` SUCCESSFUL。真机：多音轨片红键切轨；同目录 `.srt` 或 `addTimedTextSource`；HUD bars 非透传非 0；纯 mp3/aac 能出声。
+
+## 2026-11-25 Asia/Shanghai — SHW 选轨/字幕/频谱缺口一次补齐
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（javac 通过；真机待验）
+
+**改动（复用超级直播）**
+- `TimedText` 位图 + `SubtitleBitmapOverlay`（抄 MsTimedText/Overlay）
+- `M3PlayerBackend`：onCues 位图；TEXT/SUBTITLE 分型；字幕默认 disabled；buffer/TLS/passthrough/headers 进 prepare
+- `PlaySources`/`JniHttp`：外挂无 DEFAULT；HTTP headers + tlsInsecure
+- `MediaPlayer`：bind 下发配置；FD 外挂落 cache
+- msm3：位图层 + 底栏文字；菜单/角标沿用
+- `SDK接入指南` §7/§10
+
+**用途**：TVB 翡翠等多音轨+DVB 可切可见；客户缓冲/证书/直通/头不再空转。
+
+**验证**：`:msplayer`+`:app` compileDebugJavaWithJavac SUCCESSFUL。真机：菜单开 DVB 见位图；关字幕清屏；红键切音轨。
+
+## 2026-11-26 Asia/Shanghai — DIYP 测包：SDK 钉 debug 签（不改 App 签）
+
+by: Long <mycjzb@gmail.com>
+
+**状态**：完成（源码已对齐；待用户 `--pack 1` 重编 so / 换 aar）
+
+**改动**
+- `src/guard/apk_sign.c`：注释锁定现钉本机 `debug.keystore`（数组未改，已与 DIYP release→debug 一致）
+- `docs/SDK接入指南.md` §11：写明 DIYP 不改 App 签时 so 保持钉 debug，勿擅自改成 `ms-tv`
+
+**用途（反推）**：DIYP 测 MsMedia 压壳包时 App 仍用自有/debug 签；SDK 认同一证，避免 TEA/guard 误拒。公司正式上柜再换 release 指纹。
+
+**验证**：本机 debug 证 SHA-256=`b4e448fe…` 与 `EXPECT_SIGN_OBF` XOR 反解一致。用户编：
+```bash
+cd /home/long/code/MsMedia
+bash scripts/build_msm3.sh -va both
+cp -f android/msplayer/build/outputs/aar/msplayer-release.aar \
+  /data/code/DIYP影音自研解码版20261126/app/libs/msplayer-release.aar
+```
+
+## 2026-11-28 · Media3 改用超级直播共享源码（只维护一份）
+
+- **状态**：完成（未编译；JDK 交叉编译通过）
+- **改动**：
+  - `android/msplayer/build.gradle`：Media3 源码目录改为共享 `bs-p2p/third_party/media3-src`（默认同级仓库，`MS_MEDIA3_SRC` 可覆盖，缺失报错）。
+  - `android/m3demo/settings.gradle`、`android/msm3/settings.gradle`：`media3-m2` 改共享；m3demo 删重复的 HLS include，`app/build.gradle` 用 `:media3-lib-exoplayer_hls`。
+  - `scripts/build_m3demo.sh`：源码检查路径改共享。
+  - `android/msplayer/consumer-rules.pro`：反射加载的 `ApiXX` 兼容类保留规则（与超级直播一致），替换原 `AudioCapabilitiesReceiverV23`。
+  - 原本仓 `DefaultAudioSink` 的「PTS 跳变不上报错误」补丁已移植进共享源码。
+- **用途**：两边 media3 只改一份，修复（4.3 兼容、CENC 软件解密等）自动共享。
+- **验证**：`bash scripts/build_m3demo.sh`、按原流程编 `android/msm3`；通过后删除本仓 `third_party/media3-src`、`third_party/media3-m2`（已不被引用，删前确认）。
+- **注意**：编译需 bs-p2p 在同级目录（`/home/long/code/bs-p2p`）或设 `MS_MEDIA3_SRC`。

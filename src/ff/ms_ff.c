@@ -103,6 +103,7 @@ struct ms_ff {
     atomic_int_least64_t deadline_us; /* 0 = none；每轮阻塞 I/O 重新武装 */
     ms_status last_status;        /* 最近一次失败（超时/取消以外的 I/O 错误） */
     int64_t origin_90k;           /* 会话级统一原点，所有轨相同 */
+    int origin_from_meta;         /* 1=容器/首包已锚定原点；仅允许再下调 */
     int au_emitted;               /* 已发出过 AU：此后不得再下调 origin */
     ff_state state;
     AVFormatContext *ic;
@@ -296,9 +297,9 @@ const char *ms_ff_ffmpeg_license(void)
 const char *ms_ff_openssl_version(void)
 {
 #if defined(MS_NC_TLS_OPENSSL)
-    return "openssl-3.5.9-slim (netcore)"; /* 阶段 6：单 so 静态合入的极致裁剪 OpenSSL，经 netcore TLS 泵使用 */
+    return "openssl-3.5.9-slim (netcore)";
 #elif defined(MSMEDIA_NO_OPENSSL)
-    return "android-system-tls";
+    return "none";
 #else
     return OpenSSL_version(OPENSSL_VERSION);
 #endif
@@ -334,13 +335,14 @@ static int scheme_is(const char *url, const char *scheme)
 static int url_is_https(const char *url) { return scheme_is(url, "https") || scheme_is(url, "tls"); }
 static int url_is_rtmp(const char *url)
 {
-    return scheme_is(url, "rtmp") || scheme_is(url, "rtmps") || scheme_is(url, "rtmpt");
+    return scheme_is(url, "rtmp") || scheme_is(url, "rtmps") || scheme_is(url, "rtmpt") ||
+           scheme_is(url, "rtmpe");
 }
 static int url_is_http(const char *url) { return scheme_is(url, "http"); }
 static int url_is_live_unseekable_proto(const char *url)
 {
     return url_is_rtmp(url) || scheme_is(url, "udp") || scheme_is(url, "rtp") ||
-           scheme_is(url, "rtsp") || scheme_is(url, "srtp") ||
+           scheme_is(url, "rtsp") || scheme_is(url, "rtsps") || scheme_is(url, "srtp") ||
            scheme_is(url, "srtp-ktls");
 }
 
@@ -2157,6 +2159,7 @@ static void close_input(ms_ff *f)
     f->analyzeduration_used_us = -1;
     f->au_emitted = 0;
     f->origin_90k = 0;
+    f->origin_from_meta = 0;
     f->cfg_emitted_bits = 0;
     f->skip_to_key = 0;
     f->rtp_gap = 0;
@@ -2411,7 +2414,6 @@ static int probe_system_trust(char *out_file, size_t file_cap, char *out_dir, si
 
 int ms_ff_trust_ready(const ms_ff *f)
 {
-    char sys_file[512], sys_dir[512];
     if (f == NULL) {
         return 0;
     }
@@ -2428,7 +2430,10 @@ int ms_ff_trust_ready(const ms_ff *f)
     /* 路线 B：系统 TrustManager / 默认 CA，不依赖 OpenSSL 证书包路径。 */
     return 1;
 #else
-    return probe_system_trust(sys_file, sizeof(sys_file), sys_dir, sizeof(sys_dir));
+    {
+        char sys_file[512], sys_dir[512];
+        return probe_system_trust(sys_file, sizeof(sys_file), sys_dir, sizeof(sys_dir));
+    }
 #endif
 }
 
@@ -2746,12 +2751,12 @@ ms_status ms_ff_open(ms_ff *f, const char *url)
         f->analyzeduration_used_us = -1;
     }
 #ifdef MS_SINGLE_SO
-    /* 阶段 4 深度裁剪（TRIM=s4）：去 srtp/rtmpt、ogg/asf/rm/microdvd/vobsub；dts 由音频软解前缀提供。 */
+    /* s6：HTTP(S)/HLS/DASH 归 Media3+JNI；此处只保留非 HTTP 协议与容器。 */
     av_dict_set(&opt, "protocol_whitelist",
-                "file,crypto,data,http,https,tls,tcp,udp,rtp,rtmp,rtmps,rtsp,pipe,fd",
+                "file,crypto,data,tls,tcp,udp,rtp,rtmp,rtmps,rtsp,pipe,fd",
                 0);
     av_dict_set(&opt, "format_whitelist",
-                "mpegts,mpegtsraw,flv,live_flv,mov,mp4,m4a,3gp,3g2,mj2,hls,dash,rtsp,rtp,sdp,aac,h264,hevc,matroska,webm,webvtt,avi,mpegps,mpeg,mp3,flac,wav,ac3,eac3,dts,srt,ass",
+                "mpegts,mpegtsraw,flv,live_flv,mov,mp4,m4a,3gp,3g2,mj2,rtsp,rtp,sdp,aac,h264,hevc,matroska,webm,webvtt,avi,mpegps,mpeg,mp3,flac,wav,ac3,eac3,dts,srt,ass",
                 0);
 #else
     av_dict_set(&opt, "protocol_whitelist",
@@ -3168,16 +3173,18 @@ static int64_t rescale_down(int64_t v, AVRational from, AVRational to)
 static int64_t choose_time_origin(ms_ff *f)
 {
     int64_t origin = 0;
+    int have = 0;
     unsigned i;
     AVRational tb90 = {1, 90000};
     if (f == NULL || f->ic == NULL) {
         return 0;
     }
+    /* 取各轨/容器 start_time 与 priming 的最小值作原点。
+     * 旧逻辑只接受 t<0，直播 HLS 绝对 PTS（数万秒）原点一直为 0 →
+     * 视频相对时间巨大、音频钟从 0 走 → MsSync 永久 held（出首帧后卡死）。 */
     if (f->ic->start_time != AV_NOPTS_VALUE) {
-        int64_t t = rescale_down(f->ic->start_time, AV_TIME_BASE_Q, tb90);
-        if (t < origin) {
-            origin = t;
-        }
+        origin = rescale_down(f->ic->start_time, AV_TIME_BASE_Q, tb90);
+        have = 1;
     }
     for (i = 0; i < f->ic->nb_streams; i++) {
         AVStream *st = f->ic->streams[i];
@@ -3187,8 +3194,9 @@ static int64_t choose_time_origin(ms_ff *f)
         }
         if (st->start_time != AV_NOPTS_VALUE) {
             t = rescale_down(st->start_time, st->time_base, tb90);
-            if (t < origin) {
+            if (!have || t < origin) {
                 origin = t;
+                have = 1;
             }
         }
         /* lavf 9 的 matroska 等容器常把 start_time 记为 0，实际 priming 在 initial_padding。
@@ -3197,12 +3205,14 @@ static int64_t choose_time_origin(ms_ff *f)
             st->codecpar->sample_rate > 0) {
             AVRational sr = {1, st->codecpar->sample_rate};
             t = rescale_down(-(int64_t)st->codecpar->initial_padding, sr, tb90);
-            if (t < origin) {
+            if (!have || t < origin) {
                 origin = t;
+                have = 1;
             }
         }
     }
-    return origin;
+    f->origin_from_meta = have;
+    return have ? origin : 0;
 }
 
 int64_t ms_ff_time_origin_90k(const ms_ff *f)
@@ -3243,6 +3253,12 @@ static int maybe_extend_origin(ms_ff *f, const AVStream *stv, int64_t ts)
         return 0;
     }
     t90 = rescale_down(ts, stv->time_base, tb90);
+    if (!f->origin_from_meta) {
+        /* 探测未给出 start_time（快开 HLS 常见）：首包 PTS 锚定，后续包仅可下调。 */
+        f->origin_90k = t90;
+        f->origin_from_meta = 1;
+        return 0;
+    }
     if (t90 < f->origin_90k) {
         f->origin_90k = t90;
     }
@@ -3358,9 +3374,10 @@ static ms_status fill_packet_ts(ms_ff *f, const AVPacket *pkt, const AVStream *s
 static int packet_is_complete_enough(const AVPacket *pkt)
 {
     /* AVPacket 不一定天然等于完整 AU。RTP/RTSP 路径依赖 FFmpeg 的 depacketizer
-     * 与 parser（非 decoder）组帧后再到这里；残帧/损坏包由 produce_packet 拒绝。 */
-    return pkt != NULL && pkt->data != NULL && pkt->size > 0 &&
-           (pkt->flags & AV_PKT_FLAG_CORRUPT) == 0;
+     * 与 parser（非 decoder）组帧后再到这里。
+     * 直播 MPEG-TS 常被 lavf 标 AV_PKT_FLAG_CORRUPT（PES/连续计数），Media3 仍送样；
+     * 真失包走 rtp_gap→skip_to_key，不在此因 CORRUPT 拒包。 */
+    return pkt != NULL && pkt->data != NULL && pkt->size > 0;
 }
 
 
@@ -3423,6 +3440,59 @@ static int collect_hevc_cfg_from_au(ms_sample_format fmt, const uint8_t *d, int 
         *sig = hevc_ps_sig(&ps);
     }
     return (int)w;
+}
+
+/* 直播 TS 在 FAST_START 后常不置 AV_PKT_FLAG_KEY；扫 AnnexB/AVCC 找 IDR(5)。 */
+static int h264_pkt_is_key(ms_sample_format fmt, const AVPacket *pkt, unsigned ls)
+{
+    const uint8_t *d;
+    int n, i;
+    if (pkt == NULL || pkt->data == NULL || pkt->size <= 0) {
+        return 0;
+    }
+    if ((pkt->flags & AV_PKT_FLAG_KEY) != 0) {
+        return 1;
+    }
+    d = pkt->data;
+    n = pkt->size;
+    if (fmt == MS_SAMPLE_FMT_AVCC && ls >= 1 && ls <= 4) {
+        i = 0;
+        while (i + (int)ls < n) {
+            unsigned sz = 0;
+            int j, nal;
+            for (j = 0; j < (int)ls; j++) {
+                sz = (sz << 8) | d[i + j];
+            }
+            i += (int)ls;
+            if (sz == 0 || i + (int)sz > n) {
+                break;
+            }
+            nal = d[i] & 0x1f;
+            if (nal == 5) {
+                return 1;
+            }
+            i += (int)sz;
+        }
+        return 0;
+    }
+    i = 0;
+    while (i + 4 <= n) {
+        int sc, nal;
+        if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+            sc = 3;
+        } else if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 && d[i + 3] == 1) {
+            sc = 4;
+        } else {
+            i++;
+            continue;
+        }
+        nal = i + sc;
+        if (nal < n && (d[nal] & 0x1f) == 5) {
+            return 1;
+        }
+        i = nal + 1;
+    }
+    return 0;
 }
 
 static int hevc_pkt_is_key(ms_sample_format fmt, const AVPacket *pkt, unsigned ls)
@@ -3607,12 +3677,10 @@ static ms_status produce_packet(ms_ff *f)
         }
         f->held_ready = 1;
     }
+    /* 直播 TS 的 CORRUPT 多半是 lavf 误伤；Media3 不因此全局等关键帧。
+     * 真 RTP 失包仍由 rtp_gap 置 skip_to_key。此处只清旗标继续送硬解。 */
     if (f->held->flags & AV_PKT_FLAG_CORRUPT) {
-        ff_log(f, 1, "drop corrupt packet; wait for next keyframe");
-        f->skip_to_key = 1;
-        av_packet_unref(f->held);
-        f->held_ready = 0;
-        return MS_AGAIN;
+        f->held->flags &= ~AV_PKT_FLAG_CORRUPT;
     }
     if (!packet_is_complete_enough(f->held)) {
         av_packet_unref(f->held);
@@ -3930,6 +3998,16 @@ static ms_status produce_packet(ms_ff *f)
     }
     if (f->skip_to_key) {
         int is_key = (f->held->flags & AV_PKT_FLAG_KEY) != 0;
+        if (!is_key && stv->codecpar != NULL &&
+            stv->codecpar->codec_id == AV_CODEC_ID_H264) {
+            ms_sample_format sf = sample_fmt_for(stv, f->held);
+            unsigned als = 4u;
+            if (sf == MS_SAMPLE_FMT_AVCC && stv->codecpar->extradata != NULL &&
+                stv->codecpar->extradata_size >= 5) {
+                als = (unsigned)((stv->codecpar->extradata[4] & 3u) + 1u);
+            }
+            is_key = h264_pkt_is_key(sf, f->held, als);
+        }
         if (!is_key && stv->codecpar != NULL &&
             stv->codecpar->codec_id == AV_CODEC_ID_HEVC) {
             is_key = hevc_pkt_is_key(sample_fmt_for(stv, f->held), f->held,
@@ -4254,6 +4332,15 @@ static ms_status produce_packet(ms_ff *f)
     ev.track.level = MS_RECOG_AU;
     ev.sample_format = sample_fmt_for(stv, f->held);
     ev.is_keyframe = (f->held->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
+    if (!ev.is_keyframe && stv->codecpar != NULL &&
+        stv->codecpar->codec_id == AV_CODEC_ID_H264) {
+        unsigned als = 4u;
+        if (ev.sample_format == MS_SAMPLE_FMT_AVCC && stv->codecpar->extradata != NULL &&
+            stv->codecpar->extradata_size >= 5) {
+            als = (unsigned)((stv->codecpar->extradata[4] & 3u) + 1u);
+        }
+        ev.is_keyframe = h264_pkt_is_key(ev.sample_format, f->held, als);
+    }
     if (!ev.is_keyframe && stv->codecpar != NULL &&
         stv->codecpar->codec_id == AV_CODEC_ID_HEVC) {
         ev.is_keyframe = hevc_pkt_is_key(ev.sample_format, f->held, hevc_len_size(stv));
@@ -4808,6 +4895,7 @@ ms_status ms_ff_reset(ms_ff *f)
     disarm_deadline(f);
     f->last_status = MS_OK;
     f->origin_90k = 0;
+    f->origin_from_meta = 0;
     f->au_emitted = 0;
     f->state = FF_ST_NEW;
     f->session_epoch++;

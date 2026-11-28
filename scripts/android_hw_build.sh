@@ -7,9 +7,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-/home/box/.local/android-ndk-r29}}"
-SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/home/box/.local/android-sdk}}"
-JDK="${JAVA_HOME:-/home/box/.local/jdk}"
+source "$ROOT/scripts/android_env.sh"
+NDK="$MS_NDK"
+SDK="$MS_SDK"
+JDK="$MS_JDK"
 API="${ANDROID_API:-21}"
 PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 export PATH="/usr/bin:/bin:$PREBUILT/bin:$JDK/bin:${SDK}/build-tools/34.0.0:${PATH}"

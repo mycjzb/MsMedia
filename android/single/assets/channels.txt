@@ -1,0 +1,9 @@
+象征格式测,#genre#
+CCTV4K-HEVC直播,http://1266.kshome1266.top:8701/rtp/233.18.204.188:5140
+江苏卫视-HEVC,http://1266.kshome1266.top:8701/rtp/233.18.204.226:5140
+深圳CCTV1-H264-1080,http://183.16.200.23:55555/rtp/239.77.0.86:5146
+深圳卫视4K,http://183.16.200.23:55555/rtp/239.77.1.14:5146
+HLS-BestV直播,http://bp-resource-dfl.bestv.cn/148/3/video.m3u8
+HLS-浙数文4K,http://ali-xwl.cztv.com/live/channel4k2160p.m3u8
+FLV-本机H264,http://192.168.0.109:18765/h264_aac.flv
+MP4-本机1080,http://192.168.0.109:18765/h264_1080.mp4

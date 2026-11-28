@@ -55,7 +55,6 @@ Java_com_mycjzb_media_player_MediaPlayer_nativePrepare(JNIEnv *env, jclass cls, 
 {
     player_jni *pj = pj_from(h);
     const char *loc;
-    int q;
     (void)cls;
     if (pj == NULL || pj->p == NULL || jloc == NULL) {
         return MP_ERR_IO;
@@ -65,13 +64,21 @@ Java_com_mycjzb_media_player_MediaPlayer_nativePrepare(JNIEnv *env, jclass cls, 
         if (loc) (*env)->ReleaseStringUTFChars(env, jloc, loc);
         return MP_ERR_IO;
     }
-#ifndef MS_HW_HAVE_FF
+#ifdef MS_SINGLE_FFADEC
+    /* msm3：解封装归 Media3；本 so 只提供 AVIO/ADEC，JNI MediaPlayer demux 关闭。 */
+    (void)isUrl;
+    (void)timeoutMs;
+    (*env)->ReleaseStringUTFChars(env, jloc, loc);
+    return MP_ERR_UNSUPPORTED;
+#elif !defined(MS_HW_HAVE_FF)
     /* 路线 A：纯自研网络栈（ms_netsrc）支持 http/https/HLS/DASH/udp/rtp/rtmp(s)/rtsp；其它方案诚实不支持 */
     if (isUrl && (!ms_netsrc_url_supported(loc) || strncmp(loc, "file://", 7) == 0)) {
         (*env)->ReleaseStringUTFChars(env, jloc, loc);
         return MP_ERR_UNSUPPORTED;
     }
 #endif
+#ifndef MS_SINGLE_FFADEC
+    int q;
     atomic_store(&pj->mp_opened, 0);
     pthread_mutex_lock(&pj->op);
     (void)ms_hw_player_pause(pj->p);
@@ -92,6 +99,7 @@ Java_com_mycjzb_media_player_MediaPlayer_nativePrepare(JNIEnv *env, jclass cls, 
 #endif
     (*env)->ReleaseStringUTFChars(env, jloc, loc);
     return q == 0 ? 0 : MP_ERR_IO;
+#endif
 }
 
 /* 状态快照（Java 主线程轮询）：

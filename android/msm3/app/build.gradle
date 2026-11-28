@@ -1,0 +1,43 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.mycjzb.media.msm3'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.mycjzb.media.msm3'
+        minSdk 19
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        /* -Pmsm3Abis=armeabi-v7a 或 armeabi-v7a,arm64-v8a（build_msm3.sh -va） */
+        ndk {
+            abiFilters(*((project.findProperty('msm3Abis') ?: 'armeabi-v7a')
+                    .toString().split(',')*.trim().findAll { it }))
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    buildTypes {
+        debug { minifyEnabled false }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.debug
+        }
+    }
+    packaging {
+        jniLibs {
+            keepDebugSymbols += ['**/libmsplayer.so']
+        }
+    }
+}
+
+dependencies {
+    /* demo 只调打包好的 SDK 模块，不直接编 hw/java */
+    implementation project(':msplayer')
+}

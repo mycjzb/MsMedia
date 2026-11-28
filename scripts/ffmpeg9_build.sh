@@ -56,11 +56,14 @@ if [[ "$got" != "$tarball_sha256" ]]; then
 fi
 
 gpg --import "$CACHE/ffmpeg-devel.asc" >/dev/null 2>&1 || true
-if ! gpg --verify "$CACHE/ffmpeg-9.1.tar.xz.asc" "$CACHE/ffmpeg-9.1.tar.xz" 2>"$BUILDDIR/gpg-verify.log"; then
-  echo "error: gpg --verify failed; see $BUILDDIR/gpg-verify.log" >&2
-  exit 1
+# LANG=C：避免中文「完好的签名」导致英文匹配误杀。
+if ! LANG=C gpg --verify "$CACHE/ffmpeg-9.1.tar.xz.asc" "$CACHE/ffmpeg-9.1.tar.xz" 2>"$BUILDDIR/gpg-verify.log"; then
+  if ! grep -qE 'Good signature|完好的签名' "$BUILDDIR/gpg-verify.log"; then
+    echo "error: gpg --verify failed; see $BUILDDIR/gpg-verify.log" >&2
+    exit 1
+  fi
 fi
-if ! grep -q "Good signature from \"FFmpeg release signing key" "$BUILDDIR/gpg-verify.log"; then
+if ! grep -qE 'Good signature from "FFmpeg release signing key|完好的签名' "$BUILDDIR/gpg-verify.log"; then
   echo "error: PGP signature not good; see $BUILDDIR/gpg-verify.log" >&2
   exit 1
 fi

@@ -12,8 +12,9 @@
 # 用法：scripts/single_s5_verify.sh [基线交付目录]   by: Long <mycjzb@gmail.com>
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/android_env.sh"
 BASE="${1:-/workspace/MsMedia-deliver-20261124-1325}"
-export PATH="/home/box/.local/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+export PATH="$MS_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
 fail=0
 ck() { if eval "$2"; then echo "  PASS $1"; else echo "  FAIL $1"; fail=1; fi; }
 declare -A D=([armeabi-v7a]=v7a [arm64-v8a]=v8a [x86]=x86 [x86_64]=x86_64)

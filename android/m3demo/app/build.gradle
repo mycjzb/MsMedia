@@ -1,0 +1,32 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.mycjzb.media.m3demo'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.mycjzb.media.m3demo'
+        minSdk 19
+        targetSdk 24
+        versionCode 1
+        versionName '1.0-m3src'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    buildTypes {
+        debug { minifyEnabled false }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+}
+
+dependencies {
+    /* Media3 源码模块（共享 bs-p2p/third_party/media3-src），不是 Maven AAR */
+    implementation project(':media3-lib-exoplayer')
+    implementation project(':media3-lib-exoplayer_hls')
+}

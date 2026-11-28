@@ -1,11 +1,11 @@
 # MsMedia
 
-Android 播放器内核：一个 `libmsplayer.so` + 几个 Java 类，接口与 `android.media.MediaPlayer` 一致，换个包名就能用。
-视频走 MediaCodec 硬解，取流/解封装用裁剪过的 FFmpeg 9.1，HTTPS 用静态链接的裁剪 OpenSSL 3.5.9。
+Android 播放器 SDK：一套 `com.mycjzb.media.player.MediaPlayer` API，可切换 **自研引擎**（`shw:` / `libmsplayer.so`）与 **系统播放器**（`sys:`）。
 
-- 最低 Android 4.3（API 18），已在 API 18 / 34 模拟器上跑过
-- ABI：armeabi-v7a、arm64-v8a、x86、x86_64
-- 运行时只依赖系统库和 `libz.so`，不需要再带 `libssl.so` / `libcrypto.so` / `libffmpeg.so`
+**客户请先读：[docs/SDK接入指南.md](docs/SDK接入指南.md)**（接入、引擎切换、多音轨/字幕、限制）。
+
+- 最低 Android 4.3（API 18）；ABI：armeabi-v7a、arm64-v8a、x86、x86_64
+- 自研 so 运行时只依赖系统库和 `libz.so`（静态裁剪 OpenSSL + FFmpeg）
 
 仓库：<https://github.com/mycjzb/MsMedia>
 
@@ -21,16 +21,22 @@ Android 播放器内核：一个 `libmsplayer.so` + 几个 Java 类，接口与 
 | 字幕 | 内核可解 SRT、WebVTT、ASS/SSA、mov_text、PGS、DVB；文字字幕通过 `OnTimedTextListener` 回调，支持外挂 SRT/VTT/ASS |
 | 其他 | 不看扩展名，按内容探测；切片/文件前面套了 PNG/JPEG 头的会自动剥掉 |
 
-## 接入
+## 接入（摘要）
+
+完整说明见 [docs/SDK接入指南.md](docs/SDK接入指南.md)。
 
 1. 把 `libmsplayer.so` 按 ABI 放进 `src/main/jniLibs/<abi>/`。
 2. 把下面几个 Java 文件拷进工程，包名不要改（JNI 按包名查找）：
 
 ```
 android/hw/java/com/mycjzb/media/player/MediaPlayer.java
+android/hw/java/com/mycjzb/media/player/PlayEngine.java
+android/hw/java/com/mycjzb/media/player/SysPlayerBackend.java
+android/hw/java/com/mycjzb/media/player/LiveDetect.java
+android/hw/java/com/mycjzb/media/player/AspectMode.java
+android/hw/java/com/mycjzb/media/player/MsAspectLayout.java
 android/hw/java/com/mycjzb/media/player/TimedText.java
 android/hw/java/com/mycjzb/media/player/MsNativeLoader.java
-android/hw/java/com/mycjzb/media/player/MsSystemTls.java
 android/hw/java/com/mycjzb/media/player/MsHttpClient.java
 ```
 
@@ -44,6 +50,19 @@ android/hw/java/com/mycjzb/media/player/MsHttpClient.java
 4. 需要网络播放的话，记得在 Manifest 里加 `android.permission.INTERNET`。
 
 ## 用法
+
+### 引擎切换
+
+```java
+import com.mycjzb.media.player.MediaPlayer;
+import com.mycjzb.media.player.PlayEngine;
+
+MediaPlayer.setDefaultEngine(PlayEngine.SHW);    // 全局默认自研
+MediaPlayer.setDefaultEngine(PlayEngine.SYSTEM); // 或默认系统
+
+mp.setDataSource("shw:http://cdn/a.m3u8"); // 本条强制自研
+mp.setDataSource("sys:http://cdn/b.ts");   // 本条强制系统
+```
 
 ### 播放
 
@@ -65,7 +84,19 @@ mp.release();
 
 `seekTo`、`pause`、`getCurrentPosition`、`getDuration`、`setLooping`、各种 Listener 用法都不变。
 
-### 多音轨和字幕
+### 直播 / 点播与画面比例
+
+```java
+mp.setLiveHint(null);           // 自动；或 Boolean.TRUE/FALSE 强制
+boolean live = mp.isLive();     // m3u8 无 ENDLIST / mpd 直播窗 → 直播；有结尾/静态 → 点播可 seek
+
+mp.setAspectMode(AspectMode.AUTO); // auto|16:9|4:3|orig|fill
+// 布局量算：MsAspectLayout 包 Surface，OnVideoSizeChanged → setVideoSize
+```
+
+详见 [docs/SDK接入指南.md](docs/SDK接入指南.md) §5–§6。
+
+### 多音轨和字幕（自研 SHW）
 
 和系统接口一样。`TimedText` 用本库的 `com.mycjzb.media.player.TimedText`（系统那个类没法由第三方创建）。
 
@@ -134,13 +165,12 @@ int caps = MediaPlayer.getAudioPassthroughCaps(context); // 当前输出设备�
 
 ### HTTPS 证书
 
-- **播放器**默认不校验证书（自签证书、IP 直连、老盒子根证书过期都能播）。需要严格校验：
+- **播放拉流**（Media3 `JniHttpDataSource` / FFmpeg `rtmps`·`tls`）默认不校验证书（自签、IP HTTPS、过期根证书都能播）。
+- **MsHttpClient** 默认严格校验（系统 CA + 主机名），给业务 API 用。播放专用可：
 
 ```java
-mp.setPlaybackTlsVerify(true);
+new MsHttpClient.Builder().tlsInsecure(true).build();
 ```
-
-- **MsHttpClient** 一直做严格校验（系统 CA + 主机名），没有开关，用来请求业务接口。
 
 ### MsHttpClient
 
@@ -173,7 +203,23 @@ MsHttpClient.configure(new MsHttpClient.NetConfig()
 
 ## 从源码编译
 
-需要 Linux x86_64、NDK r29（`ANDROID_NDK_HOME`）、Python 3、perl、gpg、curl。
+需要 Linux x86_64、与超级直播相同的 NDK **21.4.7075529**（默认 `$ANDROID_SDK/ndk/21.4.7075529`，见 `scripts/android_env.sh`）、Python 3、perl、gpg、curl。
+
+常用入口与超级直播一样用 `-va`：
+
+```bash
+./scripts/build.sh                 # slimff 生产 so，双 ABI，默认 UPX
+./scripts/build.sh -va v7a         # 仅 armeabi-v7a
+./scripts/build.sh -va v8a         # 仅 arm64-v8a
+./scripts/build.sh -va both        # 双 ABI（默认）
+./scripts/build.sh -va all         # 依次打 v7a、v8a、both
+./scripts/build.sh pure -va v7a    # 纯自研
+./scripts/build.sh --pack 0        # 不压 so
+./scripts/build.sh --publish       # 编完同步到 MsPlayer 仓库目录
+./scripts/build.sh --deps          # 强制重编 OpenSSL/FFmpeg/msxml 前缀
+```
+
+底层分步（首次或缺前缀时 `build.sh` 也会自动编 deps）：
 
 ```bash
 # 下载并校验 FFmpeg 9.1 / OpenSSL 3.5.9 官方源码（只需一次，放在 third_party/cache，不入库）
@@ -186,10 +232,11 @@ ABIS="armeabi-v7a arm64-v8a x86 x86_64" scripts/openssl_slim_build.sh
 TRIM=s6 ADEC=1 ADEC_TAG=s6 FF_OPT=oz-flto XML_FLAVOR=ms WITH_XML=1 \
   ABIS="armeabi-v7a arm64-v8a x86 x86_64" scripts/android_slimff_ffmpeg.sh
 
-# libmsplayer.so
+# libmsplayer.so（默认 PACK_SO=1：超级直播同款 UPX 压 so；PACK_SO=0 跳过）
 MODE=slimff ADEC=1 ADEC_TAG=s6 OPT=oz-flto XML_FLAVOR=ms WITH_XML=1 TLS=openssl HLS_PF=1 \
   ABIS="armeabi-v7a arm64-v8a x86 x86_64" scripts/android_single_build.sh
 # 输出：build/android-<abi>/single-slimff-adec-s6/oz-flto/libmsplayer.so
+#       另留 libmsplayer.so.unpacked（压壳前）
 
 # 检查 NEEDED / 导出符号 / 组件
 scripts/single_s6_verify.sh

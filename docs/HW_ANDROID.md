@@ -18,7 +18,8 @@ by: Long <mycjzb@gmail.com>
 
 ## 3. Media3 经验范围（不是 Media3 等价实现）
 
-按公开 Media3 / Android MediaCodec 实践对齐，**不宣称本库等同 Media3**，不把 Media3 源码拷入本仓库，也不链 androidx.media3。
+按公开 Media3 / Android MediaCodec 实践对齐，**不宣称 libmsplayer 等同 Media3**。
+Android **演示播放**用与超级直播共用的 `bs-p2p/third_party/media3-src`（同级仓库，`MS_MEDIA3_SRC` 可覆盖；1.4.1 **源码模块**直编，见 `android/m3demo`）；**禁止**用 Maven `androidx.media3:…` AAR 冒充。C/JNI 硬解路径仍是自研，不链 Media3。
 
 本步实际采用：
 

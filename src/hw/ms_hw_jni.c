@@ -262,11 +262,6 @@ static int type_has_mime(JNIEnv *env, jobjectArray types, const char *mime)
     return 0;
 }
 
-static int type_is_avc(JNIEnv *env, jobjectArray types)
-{
-    return type_has_mime(env, types, "video/avc");
-}
-
 static ms_status pick_decoder_mime(const char *mime, const char *label,
                                    int api_level, int allow_sw, int system_sw_only,
                                    char *name, size_t name_cap,

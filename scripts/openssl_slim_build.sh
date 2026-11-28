@@ -16,7 +16,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-/home/box/.local/android-ndk-r29}}"
+source "$ROOT/scripts/android_env.sh"
+NDK="$MS_NDK"
 API="${ANDROID_API:-21}"
 PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 ORIG_SRC="$ROOT/third_party/cache/openssl-3.5.9"   # 已签名校验的原始源码（只读）
@@ -65,12 +66,20 @@ build_one() {
     host)        target=linux-x86_64;   tag=host ;;
     *) echo "error: unsupported ABI $abi" >&2; exit 2 ;;
   esac
+  # OPENSSL_SLIM_LTO=0：出 ELF .a，供 bfd+Hardening+UPX（对齐超级直播）。默认 1=flto 位码（体积优，只能 lld）。
+  local use_lto=1
+  [[ "${OPENSSL_SLIM_LTO:-1}" == 0 ]] && use_lto=0
   if [[ "$abi" == host ]]; then
     out="$ROOT/build/host/openssl-3.5.9-slim"
     opt_c=(-Os -fPIC -ffunction-sections -fdata-sections -DMS_OSSL_TLS_CLIENT_ONLY)
-  else
+  elif [[ "$use_lto" == 1 ]]; then
     out="$ROOT/build/$tag/openssl-3.5.9-slim-flto"
     opt_c=(-Oz -flto=full -fPIC -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
+           -DOPENSSL_SMALL_FOOTPRINT -DMS_OSSL_TLS_CLIENT_ONLY "-D__ANDROID_API__=$API")
+    [[ "$abi" == armeabi-v7a ]] && opt_c+=(-mthumb)
+  else
+    out="$ROOT/build/$tag/openssl-3.5.9-slim"
+    opt_c=(-Oz -fPIC -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
            -DOPENSSL_SMALL_FOOTPRINT -DMS_OSSL_TLS_CLIENT_ONLY "-D__ANDROID_API__=$API")
     [[ "$abi" == armeabi-v7a ]] && opt_c+=(-mthumb)
   fi

@@ -65,6 +65,10 @@ int  ms_nc_dial(const char *host, int port, int timeout_ms,
                 volatile int *cancel, int *out_fd);
 int  ms_nc_conn_open(const char *host, int port, int use_tls, int timeout_ms,
                      int io_timeout_ms, volatile int *cancel, ms_nc_conn **out);
+/* tls_verify：1 严格 / 0 播放忽略证书。conn_open = open2(..., verify=1)。 */
+int  ms_nc_conn_open2(const char *host, int port, int use_tls, int tls_verify,
+                      int timeout_ms, int io_timeout_ms, volatile int *cancel,
+                      ms_nc_conn **out);
 int  ms_nc_conn_read(ms_nc_conn *c, uint8_t *buf, int cap);   /* >0 字节，0=EOF，<0 错误 */
 int  ms_nc_conn_write_all(ms_nc_conn *c, const uint8_t *buf, int n);
 void ms_nc_conn_shutdown(ms_nc_conn *c);                      /* 线程安全，用于取消 */
@@ -108,7 +112,8 @@ typedef struct ms_nc_req {
     int read_timeout_ms;      /* <=0 默认 15000 */
     int max_redirects;        /* <0 默认 5；0=不跟随 */
     volatile int *cancel;     /* 可选：外部取消标志（打开前/打开中/读取中均可置 1） */
-    int keep_alive;           /* 追加：1=HTTP/1.1 Keep-Alive，响应完整读完后连接回池复用（播放器分片/清单用） */
+    int keep_alive;           /* 1=HTTP/1.1 Keep-Alive，响应完整读完后连接回池复用 */
+    int tls_insecure;         /* 1=HTTPS 不校证书（仅播放）；0=严格（业务 API 默认） */
 } ms_nc_req;
 
 /* Keep-Alive 连接池统计（测试/诊断）：opened=新建 TCP(+TLS) 次数，reused=复用次数。 */
@@ -126,10 +131,8 @@ void ms_nc_http_close(ms_nc_http *h);
 
 #ifdef __ANDROID__
 #include <jni.h>
-/* 在 Java 线程上调用一次（MediaPlayer / MsHttpClient 静态初始化），缓存应用类。
- * 原生工作线程 FindClass 只能看到系统类，必须先缓存。 */
+/* Java 线程上调用一次：缓存 MsHttpClient（DNS 回调）。TLS 已是 so 内 OpenSSL，不缓存 TLS 类。 */
 int ms_nc_jni_init(JNIEnv *env);
-jclass ms_nc_jni_tls_class(void);
 #endif
 
 #ifdef __cplusplus
