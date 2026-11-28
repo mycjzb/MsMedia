@@ -4634,3 +4634,8 @@ cp -f android/msplayer/build/outputs/aar/msplayer-release.aar \
 - 许可：`docs/THIRD_PARTY.md` 与文件头注明 Apache-2.0；**未改** `LICENSE`。FSF 认为 Apache-2.0 与工程 LGPL-2.1 不兼容，存在分发风险。
 - 测试：`build.sh test` 通过（含 `test_media3_sync`）；`single_s6_verify.sh` 4 ABI ALL PASS，导出仍 68；API34 1fps 样片：VSYNC=16.67ms 已采样，held 路径触发，drop_to_key=0；选轨自测 26 PASS / 2 FAIL，「默认字幕选中」仍失败（与 a8bb38f 同类，非本轮同步引入）。API18 冒烟：装包成功，MsMedia 首帧仍 15s 超时（OMX.google.h264 AVD，与此前一致）。
 - 帧率 2.1→1.5 结论：根因是 very-late 一律 flush 关键帧 + 预滚期 200ms 墙钟把位置推到十几秒，首帧（goldfish 约 12–15s）之后帧全部 very-late 并反复冲解码器。忠实 maybeDrop（skipSource==0 不 flush）且去掉墙钟主钟后，本轮 1fps 回放 drop_to_key 保持 0。
+
+## 2026-11-28 · 共享 media3：HLS 混流 TS 多音轨不再丢第二条
+
+- 共享源码 `bs-p2p/third_party/media3-src` 的 `HlsSampleStreamWrapper` 已改：混流 TS 里第二条起的音频 PID 单独建采样队列（不登记为映射队列），菜单可见多音轨；视频 / 元数据不变。MsMedia 重新编译即生效。
+- 补：共享 `TsExtractor` HLS 模式同类型多条音频按 PID 排名分配不同轨道 ID（第一条仍为流类型），与 `HlsSampleStreamWrapper` 修改配套，双语 AAC 两条都能出来。
